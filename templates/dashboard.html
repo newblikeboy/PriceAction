@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nifty Price Action User Console</title>
+  <link rel="stylesheet" href="/static/finalpt/styles.css?v=points-2">
+  <link rel="stylesheet" href="/static/finalpt/user-console.css?v=points-2">
+</head>
+<body class="dashboard-body user-console">
+  <div class="ambient-glow ambient-a"></div>
+  <div class="ambient-glow ambient-b"></div>
+  <div class="user-noise"></div>
+
+  <header class="mobile-topbar" aria-label="User console header">
+    <button id="sidebar-toggle" class="hamburger" type="button" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+    <p class="mobile-brand">Nifty Price Action</p>
+    <div class="topbar-actions">
+      <div class="profile-wrap" id="profile-wrap">
+        <button id="profile-toggle-btn" class="profile-btn" type="button" aria-label="Open profile menu" aria-haspopup="true" aria-expanded="false">
+          <span id="profile-avatar-text">{{ user.username[:1]|upper }}</span>
+        </button>
+        <div id="profile-menu" class="profile-menu" hidden>
+          <a class="ghost-btn" href="/logout">Logout</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="dashboard-shell">
+    <aside id="app-sidebar" class="sidebar" aria-label="Dashboard sidebar">
+      <div class="sidebar-head">
+        <div>
+          <p class="mini-label">Nifty Price Action</p>
+          <h2>User Console</h2>
+        </div>
+        <button id="sidebar-close" class="icon-btn" type="button" aria-label="Close menu">&times;</button>
+      </div>
+
+      <p class="user-line">User: {{ user.username }}</p>
+
+      <nav class="side-nav" aria-label="Sections">
+        <button type="button" class="side-nav-btn is-active" data-view-target="home">Home</button>
+        <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
+        <button type="button" class="side-nav-btn" data-view-target="trades">Paper Trades</button>
+        <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
+        <button type="button" class="side-nav-btn" data-view-target="broker">Broker</button>
+        <button type="button" class="side-nav-btn" data-view-target="profile">My Profile</button>
+        <button type="button" class="side-nav-btn" data-view-target="helpdesk">Helpdesk</button>
+      </nav>
+    </aside>
+
+    <div id="sidebar-overlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+    <main class="board-main">
+      <section class="portal-view is-active" data-view="home">
+        <header class="home-head card">
+          <div>
+            <p class="label">Home</p>
+            <h1>Paper Trading Control Center</h1>
+            <p class="subtitle">Run paper backtests, inspect trade logs, and review skipped signals for ML-ready training data.</p>
+          </div>
+        </header>
+
+        <section class="home-grid">
+          <article class="card home-card control-card">
+            <div class="line-head"><h2>Strategy Mode</h2></div>
+            <p class="small">This V1 is paper-trading-only. Live broker order execution is intentionally disabled.</p>
+            <div class="switch-list">
+              <div class="switch-row"><span>Paper Engine</span><button class="toggle-switch is-on" type="button" aria-checked="true">On</button></div>
+              <div class="switch-row"><span>Live Execution</span><button class="toggle-switch is-off" type="button" aria-checked="false">Off</button></div>
+            </div>
+          </article>
+
+          <article class="card home-card pnl-card">
+            <div class="line-head"><h2>Paper P&amp;L</h2><span class="realtime-pill">Logged</span></div>
+            <div class="kpi-grid-home">
+              <div class="kpi-box"><span>Total Points</span><strong>{{ stats.total_points }}</strong></div>
+              <div class="kpi-box"><span>Wins</span><strong>{{ stats.wins }}</strong></div>
+              <div class="kpi-box"><span>Losses</span><strong>{{ stats.losses }}</strong></div>
+              <div class="kpi-box"><span>Closed</span><strong>{{ stats.total_trades }}</strong></div>
+              <div class="kpi-box"><span>Win Rate</span><strong>{{ stats.win_rate }}%</strong></div>
+            </div>
+          </article>
+
+          <article class="card home-card active-card">
+            <div class="line-head"><h2>Active Trade</h2></div>
+            <p class="small">{{ active_trade_text }}</p>
+          </article>
+
+          <article class="card home-card trades-card">
+            <div class="line-head"><h2>Recent Closed Trades</h2></div>
+            <div class="paper-table-wrap compact-table paper-trades-wrap">
+              <table class="paper-table paper-trades-table">
+                <thead><tr><th>#</th><th>Side</th><th>Setup</th><th>Option</th><th>Entry</th><th>Exit</th><th>Points</th><th>Outcome</th></tr></thead>
+                <tbody>
+                  {% for trade in trades[:8] %}
+                  <tr>
+                    <td>{{ loop.index }}</td><td>{{ trade.direction }}</td><td>{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td><td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td>
+                    <td>{{ trade.option_exit_ltp or trade.exit_time or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.result or trade.status }}</td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="8" class="small">No paper trades yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="portal-view" data-view="backtest" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>Database Backtest</h2><span id="backtest-status-chip" class="status-chip">{{ latest_backtest.status if latest_backtest else "idle" }}</span></div>
+          <p class="small">Runs the paper strategy from candles stored in MySQL. Run the FYERS backfill script before using this.</p>
+          <form id="backtest-form" method="post" action="/backtest" class="backtest-form">
+            <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
+            <label class="field"><span>Start Date</span><input class="text-input" type="date" name="start_date"></label>
+            <label class="field"><span>End Date</span><input class="text-input" type="date" name="end_date"></label>
+            <button id="backtest-submit" class="action-btn" type="submit">Run DB Backtest</button>
+          </form>
+        </article>
+
+        <article class="card view-card backtest-progress-card">
+          <div class="line-head">
+            <h2>Run Progress</h2>
+            <strong id="backtest-progress-text" class="mono">{{ latest_backtest.progress_pct|round(2) if latest_backtest else 0 }}%</strong>
+          </div>
+          <div class="progress-track" aria-label="Backtest progress">
+            <div id="backtest-progress-fill" class="progress-fill" style="width: {{ latest_backtest.progress_pct if latest_backtest else 0 }}%"></div>
+          </div>
+          <p id="backtest-current-step" class="small">{{ latest_backtest.current_step if latest_backtest else "No backtest has been started yet." }}</p>
+        </article>
+
+        <article class="card view-card latest-backtest-card">
+          <div class="line-head"><h2>Latest Backtest Result</h2><span id="latest-backtest-id" class="status-chip">#{{ latest_backtest.id if latest_backtest else "--" }}</span></div>
+          <div class="backtest-result-grid">
+            <div class="kpi-box"><span>Status</span><strong id="latest-backtest-status">{{ latest_backtest.status if latest_backtest else "No run" }}</strong></div>
+            <div class="kpi-box"><span>Total Trades</span><strong id="latest-total-trades">{{ latest_backtest.summary.get("total_trades", 0) if latest_backtest else 0 }}</strong></div>
+            <div class="kpi-box"><span>Wins</span><strong id="latest-wins">{{ latest_backtest.summary.get("wins", 0) if latest_backtest else 0 }}</strong></div>
+            <div class="kpi-box"><span>Losses</span><strong id="latest-losses">{{ latest_backtest.summary.get("losses", 0) if latest_backtest else 0 }}</strong></div>
+            <div class="kpi-box"><span>Win Rate</span><strong id="latest-win-rate">{{ latest_backtest.summary.get("win_rate", 0) if latest_backtest else 0 }}%</strong></div>
+            <div class="kpi-box"><span>Total Points</span><strong id="latest-total-r">{{ latest_backtest.summary.get("total_points", 0) if latest_backtest else 0 }}</strong></div>
+            <div class="kpi-box"><span>Avg Points</span><strong id="latest-average-r">{{ latest_backtest.summary.get("average_points", 0) if latest_backtest else 0 }}</strong></div>
+            <div class="kpi-box"><span>Skipped</span><strong id="latest-skipped">{{ latest_backtest.skipped_count if latest_backtest else 0 }}</strong></div>
+          </div>
+          <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="trades" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>Paper Trades</h2></div>
+          <div class="backtest-result-grid paper-summary-grid">
+            <div class="kpi-box"><span>Total Trades</span><strong>{{ stats.total_trades }}</strong></div>
+            <div class="kpi-box"><span>Wins</span><strong>{{ stats.wins }}</strong></div>
+            <div class="kpi-box"><span>Losses</span><strong>{{ stats.losses }}</strong></div>
+            <div class="kpi-box"><span>Win Rate</span><strong>{{ stats.win_rate }}%</strong></div>
+            <div class="kpi-box"><span>Net Points</span><strong>{{ stats.total_points }}</strong></div>
+          </div>
+          <div class="paper-table-wrap">
+            <table class="paper-table">
+              <thead><tr><th>Date</th><th>Time</th><th>Direction</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
+              <tbody>
+                {% for trade in trades %}
+                <tr>
+                  <td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.direction }}</td><td>{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td>
+                  <td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td>
+                  <td>{{ trade.result or trade.status }}</td><td>{{ trade.points if trade.points is not none else "" }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" class="small">No trades logged yet.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="skipped" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>Skipped Signals</h2></div>
+          <p class="small">Rejected signals are retained because they are important for later ML training.</p>
+          <div class="paper-table-wrap">
+            <table class="paper-table">
+              <thead><tr><th>Date</th><th>Time</th><th>Direction</th><th>Setup</th><th>Reason</th></tr></thead>
+              <tbody>
+                {% for item in skipped %}
+                <tr><td>{{ item.date }}</td><td>{{ item.time }}</td><td>{{ item.potential_direction }}</td><td>{{ item.potential_setup }}</td><td>{{ item.skip_reason }}</td></tr>
+                {% else %}
+                <tr><td colspan="5" class="small">No skipped signals logged yet.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="broker" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>Broker</h2><span class="small">Disabled in V1</span></div>
+          <p class="small">This project is currently paper-trading-only. Broker execution and user broker credentials will be added in a later stage with explicit safeguards.</p>
+          <div class="broker-card">
+            <div class="profile-row"><span>Execution Mode</span><strong>Paper only</strong></div>
+            <div class="profile-row"><span>Live Broker Orders</span><strong>Disabled</strong></div>
+            <div class="profile-row"><span>Data Source</span><strong>MySQL candle database</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="profile" hidden>
+        <article class="card view-card">
+          <h2>My Profile</h2>
+          <div class="profile-grid">
+            <div class="profile-row"><span>Username</span><strong>{{ user.username }}</strong></div>
+            <div class="profile-row"><span>Role</span><strong>{{ user.role }}</strong></div>
+            <div class="profile-row"><span>System</span><strong>Nifty Price Action AI</strong></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="helpdesk" hidden>
+        <article class="card view-card">
+          <h2>Helpdesk</h2>
+          <p class="small">For setup issues, check `read.md` first. The current build focuses on paper trades, database backtests, backend FYERS data, and ML-ready logs.</p>
+          <div class="placeholder-grid">
+            <div class="placeholder-item"><h3>Admin</h3><p>Use `/admin/login` for FYERS and market-data controls.</p></div>
+            <div class="placeholder-item"><h3>Input</h3><p>Backtests read 1m, 5m, and 15m candles from MySQL.</p></div>
+            <div class="placeholder-item"><h3>Safety</h3><p>No live broker order placement in V1.</p></div>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/finalpt/panel.js?v=points-2"></script>
+</body>
+</html>

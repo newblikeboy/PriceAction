@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% set user = None %}
+{% block content %}
+<section class="auth-panel">
+  <h1>{{ title }}</h1>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="{{ action }}">
+    <label>Username <input name="username" required autocomplete="username"></label>
+    <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+    <button type="submit">Login</button>
+  </form>
+  <p class="muted"><a href="{{ alternate_href }}">{{ alternate_label }}</a></p>
+  {% if action == "/admin/login" %}<p class="muted">Default admin: admin / admin123</p>{% endif %}
+</section>
+{% endblock %}

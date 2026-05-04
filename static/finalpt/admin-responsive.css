@@ -1,0 +1,32 @@
+/* Responsive Table Wrapper */
+.table-responsive-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin-bottom: 1.5rem;
+    border: 1px solid #eef2f7;
+    border-radius: 8px;
+}
+
+/* Ensure the table maintains a readable width on mobile */
+.table-responsive-wrapper table {
+    min-width: 1200px; 
+    width: 100%;
+    border-collapse: collapse;
+}
+
+/* Truncate JSON and Notes columns */
+.table-responsive-wrapper td.truncate-cell {
+    max-width: 180px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.85rem;
+    color: #6c757d;
+}
+
+.table-responsive-wrapper td.truncate-cell:hover {
+    white-space: normal;
+    overflow: visible;
+    word-break: break-all;
+}

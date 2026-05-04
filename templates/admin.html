@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nifty Price Action Admin Console</title>
+  <link rel="stylesheet" href="/static/finalpt/styles.css?v=live-fast-1">
+</head>
+<body class="dashboard-body">
+  <div class="ambient-glow ambient-a"></div>
+  <div class="ambient-glow ambient-b"></div>
+
+  <header class="mobile-topbar" aria-label="Admin console header">
+    <button id="sidebar-toggle" class="hamburger" type="button" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+    <p class="mobile-brand">Nifty Price Action Admin</p>
+    <div class="profile-wrap" id="profile-wrap">
+      <button id="profile-toggle-btn" class="profile-btn" type="button" aria-label="Open profile menu" aria-haspopup="true" aria-expanded="false">
+        <span id="profile-avatar-text">A</span>
+      </button>
+      <div id="profile-menu" class="profile-menu" hidden>
+        <a class="ghost-btn" href="/logout">Logout</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="dashboard-shell">
+    <aside id="app-sidebar" class="sidebar" aria-label="Dashboard sidebar">
+      <div class="sidebar-head">
+        <div>
+          <p class="mini-label">Nifty Price Action</p>
+          <h2>Admin Console</h2>
+        </div>
+        <button id="sidebar-close" class="icon-btn" type="button" aria-label="Close menu">&times;</button>
+      </div>
+
+      <p class="user-line">Admin: {{ user.username }}</p>
+      <div class="status-stack">
+        <div class="status-pill {{ 'is-good' if preflight['status'] == 'ok' else 'is-warn' if preflight['status'] == 'warn' else 'is-bad' }}">Preflight: {{ preflight['headline'] }}</div>
+        <div class="status-pill">FYERS: {{ "token saved" if auth and auth.access_token else "token pending" }}</div>
+        {% set action_items = preflight['items'] | selectattr('action') | list %}
+        {% if action_items %}
+        <p class="small ready-summary">{{ action_items[0]['action'] }}</p>
+        {% else %}
+        <p class="small ready-summary">System ready. Paper trading only; live broker execution routes are disabled.</p>
+        {% endif %}
+      </div>
+
+      <nav class="side-nav" aria-label="Sections">
+        <button type="button" class="side-nav-btn is-active" data-view-target="home">Overview</button>
+        <button type="button" class="side-nav-btn" data-view-target="chart">Live Chart</button>
+        <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
+        <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
+        <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
+      </nav>
+
+      <div class="sidebar-actions">
+        <a class="ghost-btn" href="/dashboard">User Console</a>
+        <a class="ghost-btn" href="/logout">Logout</a>
+      </div>
+    </aside>
+
+    <div id="sidebar-overlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+    <main class="board-main">
+      {% if error %}
+      <section class="card"><p class="small">{{ error }}</p></section>
+      {% endif %}
+
+      <section class="portal-view is-active" data-view="home">
+        <header class="board-header card">
+          <div>
+            <p class="label">Runtime View</p>
+            <h1>Nifty Price Action Admin Console</h1>
+            <p class="subtitle">FYERS authentication, candle database status, paper trade audit, and skipped-signal visibility in one operator dashboard.</p>
+          </div>
+        </header>
+
+        <section class="grid top-grid">
+          <article class="card stat-card"><p class="label">Total Trades</p><h2>{{ stats.total_trades }}</h2></article>
+          <article class="card stat-card"><p class="label">Wins</p><h2>{{ stats.wins }}</h2></article>
+          <article class="card stat-card"><p class="label">Losses</p><h2>{{ stats.losses }}</h2></article>
+          <article class="card stat-card"><p class="label">Skipped</p><h2>{{ skipped|length }}</h2></article>
+        </section>
+        <section class="grid top-grid">
+          <article class="card stat-card"><p class="label">Nifty 1m Candles</p><h2>{{ candle_counts["1m"] }}</h2></article>
+          <article class="card stat-card"><p class="label">Nifty 5m Candles</p><h2>{{ candle_counts["5m"] }}</h2></article>
+          <article class="card stat-card"><p class="label">Nifty 15m Candles</p><h2>{{ candle_counts["15m"] }}</h2></article>
+        </section>
+
+        <section class="card preflight-card">
+          <div class="line-head">
+            <div>
+              <p class="label">System Preflight</p>
+              <h2>{{ preflight['headline'] }}</h2>
+            </div>
+            <span class="preflight-badge preflight-{{ preflight['status'] }}">{{ preflight['checked_at'] }}</span>
+          </div>
+          <div class="preflight-grid">
+            {% for item in preflight['items'] %}
+            <article class="preflight-item preflight-{{ item['status'] }}">
+              <div class="preflight-item-head">
+                <span class="preflight-dot"></span>
+                <strong>{{ item['name'] }}</strong>
+              </div>
+              <p>{{ item['message'] }}</p>
+              {% if item['action'] %}
+              <span class="preflight-action">{{ item['action'] }}</span>
+              {% endif %}
+            </article>
+            {% endfor %}
+          </div>
+        </section>
+      </section>
+
+      <section class="portal-view" data-view="chart" hidden>
+        <article class="card chart-panel-card">
+          <div class="line-head chart-head">
+            <div>
+              <p class="label">Live Chart</p>
+              <h2>Nifty 90-Day Candle View</h2>
+            </div>
+            <div class="chart-controls" aria-label="Timeframe controls">
+              <button type="button" class="ghost-btn tf-btn is-active" data-chart-timeframe="1m">1m</button>
+              <button type="button" class="ghost-btn tf-btn" data-chart-timeframe="5m">5m</button>
+              <button type="button" class="ghost-btn tf-btn" data-chart-timeframe="15m">15m</button>
+            </div>
+          </div>
+
+          <div class="chart-stage">
+            <div id="admin-live-chart" class="live-chart tradingview-like-chart"></div>
+            <div id="chart-crosshair-readout" class="chart-crosshair-chip">Crosshair: --</div>
+            <div id="chart-live-message" class="chart-live-message" aria-live="polite"></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="fyers" hidden>
+        <section class="grid fyers-grid">
+          <article class="card">
+            <div class="line-head"><p class="label">Open Login URL</p></div>
+            <a class="action-btn" href="/admin/fyers/login-url" target="_blank" rel="noreferrer">Open Login URL</a>
+          </article>
+
+          <article class="card">
+            <div class="line-head"><p class="label">Exchange Auth Code</p></div>
+            <form method="post" action="/admin/fyers/exchange-code" class="backtest-form">
+              <label class="field"><span>Auth Code</span><input class="text-input" name="auth_code" required></label>
+              <button class="action-btn" type="submit">Exchange And Save Token</button>
+            </form>
+            {% if token_result %}
+            <div class="status-pill">Exchange: {{ "token saved" if token_result.access_token_saved else "token pending" }}</div>
+            {% endif %}
+          </article>
+
+          <article class="card">
+            <div class="line-head"><p class="label">FYERS Token Status</p></div>
+            <div class="status-stack">
+              <div class="status-pill">Token: {{ "saved" if fyers_token_status.configured else "pending" }}</div>
+              <div class="status-pill">Access Token: {{ "saved" if fyers_token_status.has_access_token else "missing" }}</div>
+              <div class="status-pill">Refresh Token: {{ "saved" if fyers_token_status.has_refresh_token else "missing" }}</div>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="portal-view" data-view="paper" hidden>
+        <section class="grid paper-grid">
+          <article class="card">
+            <div class="line-head"><p class="label">Recent Paper Trades</p></div>
+            <div class="paper-table-wrap">
+              <table class="paper-table">
+                <thead><tr><th>Date</th><th>Side</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
+                <tbody>
+                  {% for trade in trades %}
+                  <tr>
+                    <td>{{ trade.date }}</td><td>{{ trade.direction }}</td>
+                    <td class="truncate-cell" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td><td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td>
+                    <td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.result or trade.status }}</td><td>{{ trade.points if trade.points is not none else "" }}</td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="9" class="small">No paper trades yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="portal-view" data-view="skipped" hidden>
+        <section class="grid paper-grid">
+          <article class="card">
+            <div class="line-head"><p class="label">Skipped Signals</p></div>
+            <div class="paper-table-wrap">
+              <table class="paper-table">
+                <thead><tr><th>Date</th><th>Time</th><th>Direction</th><th>Setup</th><th>Reason</th></tr></thead>
+                <tbody>
+                  {% for item in skipped %}
+                  <tr>
+                    <td>{{ item.date }}</td><td>{{ item.time }}</td><td>{{ item.potential_direction }}</td>
+                    <td class="truncate-cell" title="{{ item.potential_setup }}">{{ item.potential_setup }}</td>
+                    <td class="truncate-cell" title="{{ item.skip_reason }}">{{ item.skip_reason }}</td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="5" class="small">No skipped signals yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/finalpt/panel.js?v=points-1"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/finalpt/admin-chart.js?v=live-fast-1"></script>
+</body>
+</html>

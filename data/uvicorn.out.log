@@ -1,0 +1,13 @@
+INFO:     127.0.0.1:50771 - "GET /dashboard HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:50775 - "GET /dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50775 - "GET /static/finalpt/styles.css?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50776 - "GET /static/finalpt/user-console.css?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50778 - "GET /static/finalpt/panel.js?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50776 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50778 - "GET /api/backtest/latest HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50836 - "GET /dashboard HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50836 - "GET /static/finalpt/styles.css?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50837 - "GET /static/finalpt/user-console.css?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50839 - "GET /static/finalpt/panel.js?v=points-2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50837 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50839 - "GET /api/backtest/latest HTTP/1.1" 200 OK
