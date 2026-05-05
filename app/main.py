@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import math
 import os
 import threading
@@ -71,6 +72,19 @@ _live_trade_monitor_status: dict[str, Any] = {}
 LIVE_DB_SYMBOL = "NIFTY"
 LIVE_TRADE_MONITOR_SECONDS = 30
 LIVE_TRADE_MONITOR_INTERVAL_SECONDS = 2
+FYERS_TOTP_REFRESH_HOUR = int(os.getenv("FYERS_TOTP_REFRESH_HOUR", "8"))
+FYERS_TOTP_REFRESH_MINUTE = int(os.getenv("FYERS_TOTP_REFRESH_MINUTE", "0"))
+_fyers_token_scheduler_lock = threading.Lock()
+_fyers_token_scheduler_started = False
+_fyers_token_scheduler_stop = threading.Event()
+_fyers_token_scheduler_status: dict[str, Any] = {
+    "running": False,
+    "last_run_at": None,
+    "last_success_at": None,
+    "next_run_at": None,
+    "last_error": None,
+}
+logger = logging.getLogger(__name__)
 
 
 @app.middleware("http")
@@ -143,6 +157,78 @@ def runtime_cache_clear(prefix: str | None = None) -> None:
             return
         for key in [key for key in _runtime_cache if key.startswith(prefix)]:
             _runtime_cache.pop(key, None)
+
+
+def next_fyers_totp_refresh_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    run_at = current.replace(
+        hour=FYERS_TOTP_REFRESH_HOUR,
+        minute=FYERS_TOTP_REFRESH_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if run_at <= current:
+        run_at += timedelta(days=1)
+    return run_at
+
+
+def refresh_fyers_access_token_job(source: str = "scheduler") -> bool:
+    with _fyers_token_scheduler_lock:
+        _fyers_token_scheduler_status["last_run_at"] = datetime.now(IST).isoformat(timespec="seconds")
+        _fyers_token_scheduler_status["last_error"] = None
+    try:
+        response = get_loader().refresh_fyers_access_token_with_totp()
+        runtime_cache_clear("admin-preflight")
+        runtime_cache_clear("fyers-quote:")
+        ok = bool(response.get("access_token"))
+        with _fyers_token_scheduler_lock:
+            if ok:
+                _fyers_token_scheduler_status["last_success_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            else:
+                _fyers_token_scheduler_status["last_error"] = "Fyers response did not include access token"
+        if ok:
+            logger.info("FYERS TOTP token refresh completed from %s", source)
+        return ok
+    except Exception as exc:
+        with _fyers_token_scheduler_lock:
+            _fyers_token_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS TOTP token refresh failed from %s", source)
+        return False
+
+
+def fyers_token_scheduler_worker() -> None:
+    while not _fyers_token_scheduler_stop.is_set():
+        next_run = next_fyers_totp_refresh_time()
+        with _fyers_token_scheduler_lock:
+            _fyers_token_scheduler_status["running"] = True
+            _fyers_token_scheduler_status["next_run_at"] = next_run.isoformat(timespec="seconds")
+        wait_seconds = max(0.0, (next_run - datetime.now(IST)).total_seconds())
+        if _fyers_token_scheduler_stop.wait(wait_seconds):
+            break
+        refresh_fyers_access_token_job()
+    with _fyers_token_scheduler_lock:
+        _fyers_token_scheduler_status["running"] = False
+
+
+def ensure_fyers_token_scheduler() -> None:
+    global _fyers_token_scheduler_started
+    with _fyers_token_scheduler_lock:
+        if _fyers_token_scheduler_started:
+            return
+        _fyers_token_scheduler_stop.clear()
+        thread = threading.Thread(target=fyers_token_scheduler_worker, daemon=True, name="fyers-token-scheduler")
+        thread.start()
+        _fyers_token_scheduler_started = True
+
+
+@app.on_event("startup")
+def start_background_workers() -> None:
+    ensure_fyers_token_scheduler()
+
+
+@app.on_event("shutdown")
+def stop_background_workers() -> None:
+    _fyers_token_scheduler_stop.set()
 
 
 def cached_user(username: str) -> dict[str, Any] | None:
@@ -1765,12 +1851,21 @@ def render_admin(
     loader = get_loader()
     auth = loader.load_fyers_auth()
     fyers_app = loader.fyers_app_credentials()
+    token_meta = loader.fyers_auth_token_status()
     fyers_token_status = {
         "configured": bool(auth and auth.get("access_token")),
         "client_id": fyers_app.get("client_id"),
         "auth_path": str(loader.auth_path),
         "has_access_token": bool(auth and auth.get("access_token")),
         "has_refresh_token": bool(auth and auth.get("refresh_token")),
+        "totp_configured": loader.cfg.is_totp_configured,
+        "totp_refresh_time": f"{FYERS_TOTP_REFRESH_HOUR:02d}:{FYERS_TOTP_REFRESH_MINUTE:02d} IST",
+        "totp_scheduler": dict(_fyers_token_scheduler_status),
+        "generated_at": token_meta.get("token_generated_at_ist"),
+        "access_token_expires_at": token_meta.get("access_token_expires_at_ist"),
+        "access_token_hours_remaining": token_meta.get("access_token_hours_remaining"),
+        "refresh_token_expires_at": token_meta.get("refresh_token_expires_at_ist"),
+        "refresh_token_hours_remaining": token_meta.get("refresh_token_hours_remaining"),
     }
     trades = cached_trades(100)
     skipped = cached_skipped(100)
@@ -1864,6 +1959,23 @@ def admin_fyers_exchange_code(
             secret_key=secret_key.strip() if secret_key else None,
             redirect_uri=redirect_uri.strip() if redirect_uri else None,
         )
+        runtime_cache_clear("admin-preflight")
+        runtime_cache_clear("fyers-quote:")
+        safe_response = {key: value for key, value in response.items() if key not in {"access_token", "refresh_token"}}
+        safe_response["access_token_saved"] = bool(response.get("access_token"))
+        safe_response["refresh_token_saved"] = bool(response.get("refresh_token"))
+        return render_admin(request, user, token_result=safe_response)
+    except Exception as exc:
+        return render_admin(request, user, error=str(exc))
+
+
+@app.post("/admin/fyers/totp-refresh", response_class=HTMLResponse)
+def admin_fyers_totp_refresh(
+    request: Request,
+    user: dict[str, Any] = Depends(require_admin),
+) -> HTMLResponse:
+    try:
+        response = get_loader().refresh_fyers_access_token_with_totp()
         runtime_cache_clear("admin-preflight")
         runtime_cache_clear("fyers-quote:")
         safe_response = {key: value for key, value in response.items() if key not in {"access_token", "refresh_token"}}

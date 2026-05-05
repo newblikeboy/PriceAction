@@ -160,6 +160,14 @@
               <div class="status-pill">Token: {{ "saved" if fyers_token_status.configured else "pending" }}</div>
               <div class="status-pill">Access Token: {{ "saved" if fyers_token_status.has_access_token else "missing" }}</div>
               <div class="status-pill">Refresh Token: {{ "saved" if fyers_token_status.has_refresh_token else "missing" }}</div>
+              <div class="status-pill">Generated: {{ fyers_token_status.generated_at or "--" }}</div>
+              <div class="status-pill">Access Expires: {{ fyers_token_status.access_token_expires_at or "--" }}</div>
+              <div class="status-pill">Access Hours Left: {{ fyers_token_status.access_token_hours_remaining if fyers_token_status.access_token_hours_remaining is not none else "--" }}</div>
+              <div class="status-pill">Refresh Expires: {{ fyers_token_status.refresh_token_expires_at or "--" }}</div>
+              <div class="status-pill">Refresh Hours Left: {{ fyers_token_status.refresh_token_hours_remaining if fyers_token_status.refresh_token_hours_remaining is not none else "--" }}</div>
+              <div class="status-pill">TOTP Auto Login: {{ "ready" if fyers_token_status.totp_configured else "not configured" }}</div>
+              <div class="status-pill">Scheduled Refresh: {{ fyers_token_status.totp_refresh_time }}</div>
+              <div class="status-pill">Next Refresh: {{ fyers_token_status.totp_scheduler.next_run_at or "after restart" }}</div>
             </div>
           </article>
         </section>

@@ -19,10 +19,18 @@ class FyersConfig:
     client_id: str = os.getenv("FYERS_CLIENT_ID", "")
     secret_key: str = os.getenv("FYERS_SECRET_KEY", "")
     redirect_uri: str = os.getenv("FYERS_REDIRECT_URI", "")
+    user_id: str = os.getenv("FYERS_USER_ID", "")
+    pin: str = os.getenv("FYERS_PIN", "")
+    totp_key: str = os.getenv("FYERS_TOTP_KEY", "")
+    login_app_id: str = os.getenv("FYERS_LOGIN_APP_ID", "2")
 
     @property
     def is_configured(self) -> bool:
         return bool(self.client_id and self.secret_key and self.redirect_uri)
+
+    @property
+    def is_totp_configured(self) -> bool:
+        return bool(self.is_configured and self.user_id and self.pin and self.totp_key)
 
 
 @dataclass(frozen=True)

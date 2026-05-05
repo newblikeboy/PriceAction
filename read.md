@@ -66,6 +66,14 @@ SESSION_SECRET=change-this-long-random-secret
 FYERS_CLIENT_ID=your-fyers-client-id
 FYERS_SECRET_KEY=your-fyers-secret-key
 FYERS_REDIRECT_URI=http://127.0.0.1:8000/admin/fyers/callback
+FYERS_USER_ID=your-fyers-login-id
+FYERS_PIN=your-fyers-pin
+FYERS_TOTP_KEY=your-fyers-external-2fa-totp-secret
+# Optional, defaults to 2 for web login:
+FYERS_LOGIN_APP_ID=2
+# Optional daily automatic token refresh time in IST:
+FYERS_TOTP_REFRESH_HOUR=8
+FYERS_TOTP_REFRESH_MINUTE=0
 ```
 
 If you want to validate with Aiven's CA certificate, include the CA path in the URI:
