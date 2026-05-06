@@ -168,6 +168,10 @@
               <div class="status-pill">TOTP Auto Login: {{ "ready" if fyers_token_status.totp_configured else "not configured" }}</div>
               <div class="status-pill">Scheduled Refresh: {{ fyers_token_status.totp_refresh_time }}</div>
               <div class="status-pill">Next Refresh: {{ fyers_token_status.totp_scheduler.next_run_at or "after restart" }}</div>
+              <div class="status-pill">Market Data Scheduler: {{ "running" if fyers_token_status.market_data_scheduler.running else "stopped" }}</div>
+              <div class="status-pill">Socket: {{ "running" if fyers_token_status.market_data_scheduler.socket_running else "waiting" }}</div>
+              <div class="status-pill">Next Socket Start: {{ fyers_token_status.market_data_scheduler.next_start_at or "market open / active" }}</div>
+              <div class="status-pill">Socket Error: {{ fyers_token_status.market_data_scheduler.last_error or "--" }}</div>
             </div>
           </article>
         </section>

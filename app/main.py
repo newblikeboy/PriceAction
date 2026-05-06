@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from app.config import BASE_DIR
 from app.data_loader import DataLoader
+from app.domain import SkippedSignal
 from app.engines.levels import LevelEngine
 from app.engines.signals import SignalEngine
 from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_market_hours_status
@@ -82,6 +83,18 @@ _fyers_token_scheduler_status: dict[str, Any] = {
     "last_run_at": None,
     "last_success_at": None,
     "next_run_at": None,
+    "last_error": None,
+}
+_market_data_scheduler_lock = threading.Lock()
+_market_data_scheduler_started = False
+_market_data_scheduler_stop = threading.Event()
+_market_data_scheduler_status: dict[str, Any] = {
+    "running": False,
+    "socket_running": False,
+    "socket_connected": False,
+    "last_start_at": None,
+    "last_stop_at": None,
+    "next_start_at": None,
     "last_error": None,
 }
 logger = logging.getLogger(__name__)
@@ -221,14 +234,127 @@ def ensure_fyers_token_scheduler() -> None:
         _fyers_token_scheduler_started = True
 
 
+def next_nse_market_open_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    start = current.replace(hour=9, minute=15, second=0, microsecond=0)
+    if current.weekday() < 5 and current < start:
+        return start
+    days_ahead = 1
+    while True:
+        candidate = (current + timedelta(days=days_ahead)).replace(hour=9, minute=15, second=0, microsecond=0)
+        if candidate.weekday() < 5:
+            return candidate
+        days_ahead += 1
+
+
+def nse_market_close_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    return current.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
+def start_live_market_data_socket(source: str = "scheduler") -> bool:
+    market_hours = nse_market_hours_status()
+    with _market_data_scheduler_lock:
+        _market_data_scheduler_status["last_error"] = None
+    if not market_hours["is_open"]:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_error"] = market_hours["reason"]
+        return False
+    try:
+        session = get_socket_session()
+        with _live_socket_lock:
+            status = session.status()
+            if not status.get("running") or FYERS_NIFTY_INDEX not in (status.get("symbols") or []):
+                session.start([FYERS_NIFTY_INDEX], data_type="SymbolUpdate")
+                status = session.status()
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = bool(status.get("running"))
+            _market_data_scheduler_status["socket_connected"] = bool(status.get("connected"))
+            _market_data_scheduler_status["last_start_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            _market_data_scheduler_status["last_error"] = status.get("error")
+        logger.info("FYERS market data socket start checked from %s", source)
+        return bool(status.get("running"))
+    except Exception as exc:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS market data socket start failed from %s", source)
+        return False
+
+
+def stop_live_market_data_socket(source: str = "scheduler") -> None:
+    try:
+        session = get_socket_session()
+        with _live_socket_lock:
+            session.stop()
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_stop_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            _market_data_scheduler_status["last_error"] = None
+        logger.info("FYERS market data socket stopped from %s", source)
+    except Exception as exc:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS market data socket stop failed from %s", source)
+
+
+def market_data_scheduler_worker() -> None:
+    while not _market_data_scheduler_stop.is_set():
+        current = datetime.now(IST)
+        market_hours = nse_market_hours_status(current)
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["running"] = True
+        if not market_hours["is_open"]:
+            next_start = next_nse_market_open_time(current)
+            with _market_data_scheduler_lock:
+                _market_data_scheduler_status["next_start_at"] = next_start.isoformat(timespec="seconds")
+                _market_data_scheduler_status["socket_running"] = False
+                _market_data_scheduler_status["socket_connected"] = False
+            wait_seconds = max(0.0, (next_start - datetime.now(IST)).total_seconds())
+            if _market_data_scheduler_stop.wait(wait_seconds):
+                break
+            continue
+
+        close_at = nse_market_close_time(current)
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["next_start_at"] = None
+        while not _market_data_scheduler_stop.is_set() and nse_market_hours_status()["is_open"]:
+            start_live_market_data_socket()
+            remaining = max(1.0, (close_at - datetime.now(IST)).total_seconds())
+            if _market_data_scheduler_stop.wait(min(30.0, remaining)):
+                break
+        stop_live_market_data_socket()
+
+    with _market_data_scheduler_lock:
+        _market_data_scheduler_status["running"] = False
+
+
+def ensure_market_data_scheduler() -> None:
+    global _market_data_scheduler_started
+    with _market_data_scheduler_lock:
+        if _market_data_scheduler_started:
+            return
+        _market_data_scheduler_stop.clear()
+        thread = threading.Thread(target=market_data_scheduler_worker, daemon=True, name="fyers-market-data-scheduler")
+        thread.start()
+        _market_data_scheduler_started = True
+
+
 @app.on_event("startup")
 def start_background_workers() -> None:
     ensure_fyers_token_scheduler()
+    ensure_market_data_scheduler()
 
 
 @app.on_event("shutdown")
 def stop_background_workers() -> None:
     _fyers_token_scheduler_stop.set()
+    _market_data_scheduler_stop.set()
+    stop_live_market_data_socket(source="shutdown")
 
 
 def cached_user(username: str) -> dict[str, Any] | None:
@@ -938,20 +1064,28 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
         if candles_1m.empty or candles_5m.empty:
             return
         level_set = LevelEngine().calculate(candles_5m, trading_date)
-        signals, skipped = SignalEngine().generate_for_day(candles_5m, candles_1m, level_set, trading_date)
+        signals, skipped = SignalEngine().generate_for_candle(candles_5m, candles_1m, level_set, trading_date, candle_time)
         paper = PaperTradeEngine()
         saved_trades = 0
         saved_skipped = 0
         for signal in signals:
-            if not matches_closed_5m_candle_time(signal.time, candle_time):
+            if db.list_open_trades(LIVE_DB_SYMBOL, limit=1):
+                skipped_signal = SkippedSignal(
+                    signal.date,
+                    str(signal.features.get("time") or signal.time),
+                    signal.direction,
+                    signal.setup_type,
+                    "Another trade is already open",
+                    {"entry_time": signal.time},
+                )
+                if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
+                    saved_skipped += 1
                 continue
             trade = paper.create_trade(signal).to_dict()
             attach_live_option_pricing(trade, signal)
             if db.insert_trade_if_absent(trade) is not None:
                 saved_trades += 1
         for skipped_signal in skipped:
-            if not matches_closed_5m_candle_time(skipped_signal.time, candle_time):
-                continue
             if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
                 saved_skipped += 1
         if saved_trades:
@@ -1861,6 +1995,7 @@ def render_admin(
         "totp_configured": loader.cfg.is_totp_configured,
         "totp_refresh_time": f"{FYERS_TOTP_REFRESH_HOUR:02d}:{FYERS_TOTP_REFRESH_MINUTE:02d} IST",
         "totp_scheduler": dict(_fyers_token_scheduler_status),
+        "market_data_scheduler": dict(_market_data_scheduler_status),
         "generated_at": token_meta.get("token_generated_at_ist"),
         "access_token_expires_at": token_meta.get("access_token_expires_at_ist"),
         "access_token_hours_remaining": token_meta.get("access_token_hours_remaining"),
