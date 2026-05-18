@@ -19,10 +19,18 @@ class FyersConfig:
     client_id: str = os.getenv("FYERS_CLIENT_ID", "")
     secret_key: str = os.getenv("FYERS_SECRET_KEY", "")
     redirect_uri: str = os.getenv("FYERS_REDIRECT_URI", "")
+    user_id: str = os.getenv("FYERS_USER_ID", "")
+    pin: str = os.getenv("FYERS_PIN", "")
+    totp_key: str = os.getenv("FYERS_TOTP_KEY", "")
+    login_app_id: str = os.getenv("FYERS_LOGIN_APP_ID", "2")
 
     @property
     def is_configured(self) -> bool:
         return bool(self.client_id and self.secret_key and self.redirect_uri)
+
+    @property
+    def is_totp_configured(self) -> bool:
+        return bool(self.is_configured and self.user_id and self.pin and self.totp_key)
 
 
 @dataclass(frozen=True)
@@ -101,6 +109,28 @@ class StrategyConfig:
     round_number_step: int = 100
     failed_level_limit: int = 2
     entry_mode: str = "close"
+    fvg_min_points: float = 1.0
+    fvg_lookback_candles: int = 12
+    mss_min_strength: float = 0.20
+    htf_bias_filter_enabled: bool = True
+    htf_bias_allow_neutral: bool = True
+    htf_15m_min_bars: int = 8
+    htf_60m_min_bars: int = 4
+    premium_discount_filter_enabled: bool = True
+    premium_discount_allow_equilibrium: bool = True
+    premium_discount_equilibrium_band_pct: float = 0.10
+    premium_discount_min_range_points: float = 20.0
+    late_reversal_start: str = "11:00"
+    target_reversal_min_rejection_pct: float = 0.55
+    target_reversal_hit_buffer_points: float = 2.0
+    target_reversal_require_fresh_touch: bool = True
+    inducement_lookback_candles: int = 8
+    option_selection_enabled: bool = True
+    option_selection_moneyness: str = "SCORE_BASED"
+    option_score_atm_min: int = 75
+    option_score_otm_min: int = 88
+    option_selection_strikecount: int = 11
+    option_selection_min_ltp: float = 1.0
 
     # Scoring Weights
     weight_bos: int = 20

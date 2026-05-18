@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import math
 import os
 import threading
@@ -22,8 +23,9 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
-from app.config import BASE_DIR
+from app.config import BASE_DIR, config
 from app.data_loader import DataLoader
+from app.domain import SkippedSignal
 from app.engines.levels import LevelEngine
 from app.engines.signals import SignalEngine
 from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_market_hours_status
@@ -71,6 +73,31 @@ _live_trade_monitor_status: dict[str, Any] = {}
 LIVE_DB_SYMBOL = "NIFTY"
 LIVE_TRADE_MONITOR_SECONDS = 30
 LIVE_TRADE_MONITOR_INTERVAL_SECONDS = 2
+FYERS_TOTP_REFRESH_HOUR = int(os.getenv("FYERS_TOTP_REFRESH_HOUR", "8"))
+FYERS_TOTP_REFRESH_MINUTE = int(os.getenv("FYERS_TOTP_REFRESH_MINUTE", "0"))
+_fyers_token_scheduler_lock = threading.Lock()
+_fyers_token_scheduler_started = False
+_fyers_token_scheduler_stop = threading.Event()
+_fyers_token_scheduler_status: dict[str, Any] = {
+    "running": False,
+    "last_run_at": None,
+    "last_success_at": None,
+    "next_run_at": None,
+    "last_error": None,
+}
+_market_data_scheduler_lock = threading.Lock()
+_market_data_scheduler_started = False
+_market_data_scheduler_stop = threading.Event()
+_market_data_scheduler_status: dict[str, Any] = {
+    "running": False,
+    "socket_running": False,
+    "socket_connected": False,
+    "last_start_at": None,
+    "last_stop_at": None,
+    "next_start_at": None,
+    "last_error": None,
+}
+logger = logging.getLogger(__name__)
 
 
 @app.middleware("http")
@@ -145,6 +172,191 @@ def runtime_cache_clear(prefix: str | None = None) -> None:
             _runtime_cache.pop(key, None)
 
 
+def next_fyers_totp_refresh_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    run_at = current.replace(
+        hour=FYERS_TOTP_REFRESH_HOUR,
+        minute=FYERS_TOTP_REFRESH_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if run_at <= current:
+        run_at += timedelta(days=1)
+    return run_at
+
+
+def refresh_fyers_access_token_job(source: str = "scheduler") -> bool:
+    with _fyers_token_scheduler_lock:
+        _fyers_token_scheduler_status["last_run_at"] = datetime.now(IST).isoformat(timespec="seconds")
+        _fyers_token_scheduler_status["last_error"] = None
+    try:
+        response = get_loader().refresh_fyers_access_token_with_totp()
+        runtime_cache_clear("admin-preflight")
+        runtime_cache_clear("fyers-quote:")
+        ok = bool(response.get("access_token"))
+        with _fyers_token_scheduler_lock:
+            if ok:
+                _fyers_token_scheduler_status["last_success_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            else:
+                _fyers_token_scheduler_status["last_error"] = "Fyers response did not include access token"
+        if ok:
+            logger.info("FYERS TOTP token refresh completed from %s", source)
+        return ok
+    except Exception as exc:
+        with _fyers_token_scheduler_lock:
+            _fyers_token_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS TOTP token refresh failed from %s", source)
+        return False
+
+
+def fyers_token_scheduler_worker() -> None:
+    while not _fyers_token_scheduler_stop.is_set():
+        next_run = next_fyers_totp_refresh_time()
+        with _fyers_token_scheduler_lock:
+            _fyers_token_scheduler_status["running"] = True
+            _fyers_token_scheduler_status["next_run_at"] = next_run.isoformat(timespec="seconds")
+        wait_seconds = max(0.0, (next_run - datetime.now(IST)).total_seconds())
+        if _fyers_token_scheduler_stop.wait(wait_seconds):
+            break
+        refresh_fyers_access_token_job()
+    with _fyers_token_scheduler_lock:
+        _fyers_token_scheduler_status["running"] = False
+
+
+def ensure_fyers_token_scheduler() -> None:
+    global _fyers_token_scheduler_started
+    with _fyers_token_scheduler_lock:
+        if _fyers_token_scheduler_started:
+            return
+        _fyers_token_scheduler_stop.clear()
+        thread = threading.Thread(target=fyers_token_scheduler_worker, daemon=True, name="fyers-token-scheduler")
+        thread.start()
+        _fyers_token_scheduler_started = True
+
+
+def next_nse_market_open_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    start = current.replace(hour=9, minute=15, second=0, microsecond=0)
+    if current.weekday() < 5 and current < start:
+        return start
+    days_ahead = 1
+    while True:
+        candidate = (current + timedelta(days=days_ahead)).replace(hour=9, minute=15, second=0, microsecond=0)
+        if candidate.weekday() < 5:
+            return candidate
+        days_ahead += 1
+
+
+def nse_market_close_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    return current.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
+def start_live_market_data_socket(source: str = "scheduler") -> bool:
+    market_hours = nse_market_hours_status()
+    with _market_data_scheduler_lock:
+        _market_data_scheduler_status["last_error"] = None
+    if not market_hours["is_open"]:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_error"] = market_hours["reason"]
+        return False
+    try:
+        session = get_socket_session()
+        with _live_socket_lock:
+            status = session.status()
+            if not status.get("running") or FYERS_NIFTY_INDEX not in (status.get("symbols") or []):
+                session.start([FYERS_NIFTY_INDEX], data_type="SymbolUpdate")
+                status = session.status()
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = bool(status.get("running"))
+            _market_data_scheduler_status["socket_connected"] = bool(status.get("connected"))
+            _market_data_scheduler_status["last_start_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            _market_data_scheduler_status["last_error"] = status.get("error")
+        logger.info("FYERS market data socket start checked from %s", source)
+        return bool(status.get("running"))
+    except Exception as exc:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS market data socket start failed from %s", source)
+        return False
+
+
+def stop_live_market_data_socket(source: str = "scheduler") -> None:
+    try:
+        session = get_socket_session()
+        with _live_socket_lock:
+            session.stop()
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["socket_running"] = False
+            _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_stop_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            _market_data_scheduler_status["last_error"] = None
+        logger.info("FYERS market data socket stopped from %s", source)
+    except Exception as exc:
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["last_error"] = str(exc)
+        logger.exception("FYERS market data socket stop failed from %s", source)
+
+
+def market_data_scheduler_worker() -> None:
+    while not _market_data_scheduler_stop.is_set():
+        current = datetime.now(IST)
+        market_hours = nse_market_hours_status(current)
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["running"] = True
+        if not market_hours["is_open"]:
+            next_start = next_nse_market_open_time(current)
+            with _market_data_scheduler_lock:
+                _market_data_scheduler_status["next_start_at"] = next_start.isoformat(timespec="seconds")
+                _market_data_scheduler_status["socket_running"] = False
+                _market_data_scheduler_status["socket_connected"] = False
+            wait_seconds = max(0.0, (next_start - datetime.now(IST)).total_seconds())
+            if _market_data_scheduler_stop.wait(wait_seconds):
+                break
+            continue
+
+        close_at = nse_market_close_time(current)
+        with _market_data_scheduler_lock:
+            _market_data_scheduler_status["next_start_at"] = None
+        while not _market_data_scheduler_stop.is_set() and nse_market_hours_status()["is_open"]:
+            start_live_market_data_socket()
+            remaining = max(1.0, (close_at - datetime.now(IST)).total_seconds())
+            if _market_data_scheduler_stop.wait(min(30.0, remaining)):
+                break
+        stop_live_market_data_socket()
+
+    with _market_data_scheduler_lock:
+        _market_data_scheduler_status["running"] = False
+
+
+def ensure_market_data_scheduler() -> None:
+    global _market_data_scheduler_started
+    with _market_data_scheduler_lock:
+        if _market_data_scheduler_started:
+            return
+        _market_data_scheduler_stop.clear()
+        thread = threading.Thread(target=market_data_scheduler_worker, daemon=True, name="fyers-market-data-scheduler")
+        thread.start()
+        _market_data_scheduler_started = True
+
+
+@app.on_event("startup")
+def start_background_workers() -> None:
+    ensure_fyers_token_scheduler()
+    ensure_market_data_scheduler()
+
+
+@app.on_event("shutdown")
+def stop_background_workers() -> None:
+    _fyers_token_scheduler_stop.set()
+    _market_data_scheduler_stop.set()
+    stop_live_market_data_socket(source="shutdown")
+
+
 def cached_user(username: str) -> dict[str, Any] | None:
     user = runtime_cache_get(f"user:{username}", 20, lambda: get_db().get_user(username), copy_value=True)
     return dict(user) if user else None
@@ -172,7 +384,13 @@ def cached_fyers_quote_details(symbol: str) -> dict[str, Any] | None:
 
 
 def cached_option_snapshot() -> dict[str, Any] | None:
-    return runtime_cache_get("fyers-option-snapshot:NIFTY", 10, lambda: get_loader().fetch_fyers_option_snapshot(FYERS_NIFTY_INDEX, 11), copy_value=True)
+    strikecount = max(11, int(config.option_selection_strikecount))
+    return runtime_cache_get(
+        f"fyers-option-snapshot:NIFTY:{strikecount}",
+        10,
+        lambda: get_loader().fetch_fyers_option_snapshot(FYERS_NIFTY_INDEX, strikecount),
+        copy_value=True,
+    )
 
 
 def live_socket_quote(symbol: str) -> dict[str, Any]:
@@ -852,20 +1070,28 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
         if candles_1m.empty or candles_5m.empty:
             return
         level_set = LevelEngine().calculate(candles_5m, trading_date)
-        signals, skipped = SignalEngine().generate_for_day(candles_5m, candles_1m, level_set, trading_date)
+        signals, skipped = SignalEngine().generate_for_candle(candles_5m, candles_1m, level_set, trading_date, candle_time)
         paper = PaperTradeEngine()
         saved_trades = 0
         saved_skipped = 0
         for signal in signals:
-            if not matches_closed_5m_candle_time(signal.time, candle_time):
+            if db.list_open_trades(LIVE_DB_SYMBOL, limit=1):
+                skipped_signal = SkippedSignal(
+                    signal.date,
+                    str(signal.features.get("time") or signal.time),
+                    signal.direction,
+                    signal.setup_type,
+                    "Another trade is already open",
+                    {"entry_time": signal.time},
+                )
+                if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
+                    saved_skipped += 1
                 continue
             trade = paper.create_trade(signal).to_dict()
             attach_live_option_pricing(trade, signal)
             if db.insert_trade_if_absent(trade) is not None:
                 saved_trades += 1
         for skipped_signal in skipped:
-            if not matches_closed_5m_candle_time(skipped_signal.time, candle_time):
-                continue
             if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
                 saved_skipped += 1
         if saved_trades:
@@ -891,8 +1117,8 @@ def attach_live_option_pricing(trade: dict[str, Any], signal: Any) -> None:
             features=getattr(signal, "features", features) if isinstance(getattr(signal, "features", features), dict) else features,
             option_snapshot=snapshot,
         )
-        features["selected_option"] = selected
-        symbol = str(selected.get("symbol") or "").strip()
+        features["selected_option_contract"] = selected
+        symbol = str(selected.get("quote_symbol") or selected.get("symbol") or "").strip()
         trade["option_symbol"] = symbol or None
         trade["option_side"] = selected.get("side") or trade.get("direction")
         trade["option_strike"] = selected.get("strike")
@@ -904,8 +1130,10 @@ def attach_live_option_pricing(trade: dict[str, Any], signal: Any) -> None:
             trade["pnl_source"] = "option_quote"
             features["option_entry_ltp"] = round(entry_ltp, 2)
             features["option_quote_ts"] = to_int((quote or {}).get("timestamp"), to_int(selected.get("snapshot_ts"), 0))
+            features["option_selection_status"] = "resolved_with_entry_quote"
         else:
             features["option_pricing_status"] = "entry_ltp_unavailable"
+            features["option_selection_status"] = selected.get("status") or "symbol_unavailable"
     except Exception as exc:
         features["option_pricing_status"] = f"error:{exc}"
     trade["features"] = features
@@ -977,6 +1205,8 @@ def update_live_open_trades(
 
         option_entry = to_float(trade.get("option_entry_ltp"), 0.0)
         option_exit = mark_ltp if mark_ltp > 0.0 else to_float(trade.get("option_mark_ltp"), 0.0)
+        if option_symbol and option_entry <= 0.0 and option_exit > 0.0:
+            option_entry = option_exit
         if direction == "CE":
             underlying_points = close_price - underlying_entry
         else:
@@ -987,7 +1217,7 @@ def update_live_open_trades(
         else:
             points = underlying_points
             option_exit = None
-            pnl_source = "underlying_fallback"
+            pnl_source = "underlying_fallback" if not option_symbol else "option_quote_unavailable"
         r_multiple = round(points / to_float(trade.get("risk_points"), 1.0), 3) if to_float(trade.get("risk_points"), 0.0) else 0
         result = "WIN" if points > 0 else "LOSS" if points < 0 else "FLAT"
         features = json_payload(trade.get("features_json"))
@@ -1765,12 +1995,22 @@ def render_admin(
     loader = get_loader()
     auth = loader.load_fyers_auth()
     fyers_app = loader.fyers_app_credentials()
+    token_meta = loader.fyers_auth_token_status()
     fyers_token_status = {
         "configured": bool(auth and auth.get("access_token")),
         "client_id": fyers_app.get("client_id"),
         "auth_path": str(loader.auth_path),
         "has_access_token": bool(auth and auth.get("access_token")),
         "has_refresh_token": bool(auth and auth.get("refresh_token")),
+        "totp_configured": loader.cfg.is_totp_configured,
+        "totp_refresh_time": f"{FYERS_TOTP_REFRESH_HOUR:02d}:{FYERS_TOTP_REFRESH_MINUTE:02d} IST",
+        "totp_scheduler": dict(_fyers_token_scheduler_status),
+        "market_data_scheduler": dict(_market_data_scheduler_status),
+        "generated_at": token_meta.get("token_generated_at_ist"),
+        "access_token_expires_at": token_meta.get("access_token_expires_at_ist"),
+        "access_token_hours_remaining": token_meta.get("access_token_hours_remaining"),
+        "refresh_token_expires_at": token_meta.get("refresh_token_expires_at_ist"),
+        "refresh_token_hours_remaining": token_meta.get("refresh_token_hours_remaining"),
     }
     trades = cached_trades(100)
     skipped = cached_skipped(100)
@@ -1864,6 +2104,23 @@ def admin_fyers_exchange_code(
             secret_key=secret_key.strip() if secret_key else None,
             redirect_uri=redirect_uri.strip() if redirect_uri else None,
         )
+        runtime_cache_clear("admin-preflight")
+        runtime_cache_clear("fyers-quote:")
+        safe_response = {key: value for key, value in response.items() if key not in {"access_token", "refresh_token"}}
+        safe_response["access_token_saved"] = bool(response.get("access_token"))
+        safe_response["refresh_token_saved"] = bool(response.get("refresh_token"))
+        return render_admin(request, user, token_result=safe_response)
+    except Exception as exc:
+        return render_admin(request, user, error=str(exc))
+
+
+@app.post("/admin/fyers/totp-refresh", response_class=HTMLResponse)
+def admin_fyers_totp_refresh(
+    request: Request,
+    user: dict[str, Any] = Depends(require_admin),
+) -> HTMLResponse:
+    try:
+        response = get_loader().refresh_fyers_access_token_with_totp()
         runtime_cache_clear("admin-preflight")
         runtime_cache_clear("fyers-quote:")
         safe_response = {key: value for key, value in response.items() if key not in {"access_token", "refresh_token"}}

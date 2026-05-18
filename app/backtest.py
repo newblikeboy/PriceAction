@@ -6,7 +6,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from app.config import StrategyConfig, config
-from app.domain import PaperTrade, SkippedSignal
+from app.domain import PaperTrade, SignalCandidate, SkippedSignal
 from app.engines.levels import LevelEngine
 from app.engines.signals import SignalEngine
 from app.paper_trading import PaperTradeEngine
@@ -31,9 +31,11 @@ class BacktestRunner:
         candles_5m: pd.DataFrame,
         candles_1m: pd.DataFrame,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        option_snapshot: dict[str, Any] | None = None,
     ) -> BacktestResult:
         trades: list[PaperTrade] = []
         skipped: list[SkippedSignal] = []
+        self.signals.option_snapshot = option_snapshot
         trading_dates = sorted(candles_5m["date"].unique())
         total_days = len(trading_dates)
         if progress_callback:
@@ -49,7 +51,9 @@ class BacktestRunner:
             day_levels = self.levels.calculate(candles_5m, trading_date)
             day_signals, day_skipped = self.signals.generate_for_day(candles_5m, candles_1m, day_levels, trading_date)
             skipped.extend(day_skipped)
-            trades.extend(self.paper.simulate_many(day_signals, candles_1m))
+            selected_signals, blocked_signals = self._select_one_trade_at_a_time(day_signals, candles_1m)
+            skipped.extend(blocked_signals)
+            trades.extend(self.paper.simulate_many(selected_signals, candles_1m))
             if progress_callback:
                 progress_callback(
                     {
@@ -62,6 +66,36 @@ class BacktestRunner:
                     }
                 )
         return BacktestResult(trades=trades, skipped_signals=skipped, summary=self.summary(trades, candles_5m))
+
+    def _select_one_trade_at_a_time(
+        self,
+        signals: list[SignalCandidate],
+        candles_1m: pd.DataFrame,
+    ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
+        selected: list[SignalCandidate] = []
+        skipped: list[SkippedSignal] = []
+        open_until: pd.Timestamp | None = None
+        for signal in sorted(signals, key=lambda item: (item.date, item.time, -item.setup_score)):
+            entry_at = pd.to_datetime(f"{signal.date} {signal.time}")
+            if open_until is not None and entry_at <= open_until:
+                skipped.append(
+                    SkippedSignal(
+                        signal.date,
+                        str(signal.features.get("time") or signal.time),
+                        signal.direction,
+                        signal.setup_type,
+                        "Another trade is already open",
+                        {"entry_time": signal.time, "open_until": open_until.strftime("%H:%M")},
+                    )
+                )
+                continue
+            simulated = self.paper.simulate_trade(self.paper.create_trade(signal), candles_1m)
+            selected.append(signal)
+            if simulated.exit_time:
+                open_until = pd.to_datetime(f"{simulated.date} {simulated.exit_time}")
+            else:
+                open_until = pd.to_datetime(f"{signal.date} {self.cfg.square_off_time}")
+        return selected, skipped
 
     def summary(self, trades: list[PaperTrade], candles_5m: pd.DataFrame) -> dict[str, Any]:
         closed = [trade for trade in trades if trade.status == "CLOSED"]

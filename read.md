@@ -35,9 +35,12 @@
 - Modular rule engines:
   - `DataLoader` for CSV validation, 1m to 5m/15m resampling, Fyers auth, and quote fetch.
   - `LevelEngine` for PDH, PDL, PDC, ORH, ORL, swings, day high/low, and round levels.
-  - `StructureEngine` for confirmed swings, trend, BOS, and 1m confirmation.
+  - `StructureEngine` for confirmed swings, trend, BOS, CHoCH/MSS classification, and 1m confirmation.
   - `DisplacementEngine` for bullish/bearish displacement rules.
+  - `HTFBiasEngine` for non-lookahead 15m and 60m-equivalent directional bias from completed 5m candles.
+  - `PremiumDiscountEngine` for dealing-range premium/equilibrium/discount filtering.
   - `LiquidityEngine` for sweeps of ORH, ORL, PDH, PDL, and swing levels.
+  - `LiquidityContextEngine` for internal/external liquidity classification and inducement detection.
   - `OrderBlockEngine` for last opposite candle order-block zones and retests.
   - `SignalEngine` for OR breakout, liquidity sweep reversal, and OB retest continuation candidates.
   - `RiskEngine` for candle/structure-based SL, liquidity target, minimum 1:2 RR, and setup score.
@@ -49,11 +52,16 @@
 - Fyers market-data integration adapter:
   - `FyersMarketDataSocket` for live tick subscription.
   - `FyersQuotePoller` for 3-second quote polling used by paper trade monitoring.
+- Real option contract selection for live paper trades:
+  - Default policy selects Nifty CE/PE from setup score: ITM-1 for normal accepted signals, ATM for strong signals, and OTM-1 for highest-score signals.
+  - Resolved contract symbol, side, strike, expiry, entry LTP, and mark LTP are stored on paper trades when FYERS option quotes are available.
+  - Database backtests use current live FYERS option-chain symbols for option metadata, while entries, exits, and P&L remain based on historical Nifty underlying candles.
 
 ## Implemented Setup Coverage
 
-- Opening Range breakout/breakdown continuation with displacement, BOS, 1m confirmation, candle SL, liquidity target, RR validation, and scoring.
-- Liquidity sweep reversal with sweep detection, displacement within the next 1 to 5 candles, BOS, optional OB context, candle SL, liquidity target, RR validation, and scoring.
+- Opening Range breakout/breakdown continuation with HTF bias and premium/discount filtering, displacement, BOS/CHoCH/MSS, 1m confirmation, FVG context, internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
+- Liquidity sweep reversal with HTF bias and premium/discount filtering, sweep detection, next-5m confirmation, BOS/CHoCH/MSS, optional OB/FVG context, inducement/internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
+- Late liquidity target reversal after 11:00 with fresh liquidity-level touch, rejection candle, next-5m confirmation, HTF bias, premium/discount filtering, FVG/structure context, inducement/internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
 - Order-block retest continuation after displacement and BOS.
 
 ## Database Configuration
@@ -66,6 +74,14 @@ SESSION_SECRET=change-this-long-random-secret
 FYERS_CLIENT_ID=your-fyers-client-id
 FYERS_SECRET_KEY=your-fyers-secret-key
 FYERS_REDIRECT_URI=http://127.0.0.1:8000/admin/fyers/callback
+FYERS_USER_ID=your-fyers-login-id
+FYERS_PIN=your-fyers-pin
+FYERS_TOTP_KEY=your-fyers-external-2fa-totp-secret
+# Optional, defaults to 2 for web login:
+FYERS_LOGIN_APP_ID=2
+# Optional daily automatic token refresh time in IST:
+FYERS_TOTP_REFRESH_HOUR=8
+FYERS_TOTP_REFRESH_MINUTE=0
 ```
 
 If you want to validate with Aiven's CA certificate, include the CA path in the URI:
@@ -78,12 +94,9 @@ The database schema is created automatically on startup. The app creates the def
 
 ## Partially Completed / Needs More Work
 
-- Late reversal after liquidity target hit is not fully implemented yet.
-- CHoCH is not separately exposed yet; BOS is implemented.
 - Choppy market detection, repeated false-break penalties, and failed-level counters need stronger stateful rules.
-- 15m higher timeframe bias is scaffolded through data validation/resampling but not yet used as a hard setup filter.
 - Fyers socket is added as a market-data adapter, but live candle building from ticks still needs production hardening.
-- Option instrument selection for ATM or 1-strike ITM CE/PE is not implemented because V1 paper trades are tracked on Nifty index price only.
+- Historical option-candle storage is not implemented yet, so database backtests cannot replay true option LTP candles.
 
 ## How To Run
 

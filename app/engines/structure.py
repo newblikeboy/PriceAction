@@ -39,6 +39,40 @@ class StructureEngine:
             "strength": self._strength(row, high if bullish else low if bearish else None, "bullish" if bullish else "bearish" if bearish else None),
         }
 
+    def structure_shift(self, candles: pd.DataFrame, index: int) -> dict[str, Any]:
+        base = self.bos(candles, index)
+        direction = base.get("direction")
+        trend_before = self.trend(candles, index - 1)
+        is_structure_break = bool(base.get("is_bos"))
+        is_continuation_bos = (
+            (direction == "bullish" and trend_before == "up")
+            or (direction == "bearish" and trend_before == "down")
+        )
+        is_choch = (
+            (direction == "bullish" and trend_before == "down")
+            or (direction == "bearish" and trend_before == "up")
+        )
+        strength = float(base.get("strength") or 0)
+        is_mss = bool(is_structure_break and (is_choch or trend_before == "range") and strength >= self.cfg.mss_min_strength)
+        break_type = None
+        if is_continuation_bos:
+            break_type = "BOS"
+        elif is_choch:
+            break_type = "MSS" if is_mss else "CHOCH"
+        elif is_mss:
+            break_type = "MSS"
+        elif is_structure_break:
+            break_type = "STRUCTURE_BREAK"
+        return {
+            **base,
+            "trend_before": trend_before,
+            "is_structure_break": is_structure_break,
+            "is_bos": is_continuation_bos,
+            "is_choch": is_choch,
+            "is_mss": is_mss,
+            "break_type": break_type,
+        }
+
     def trend(self, candles: pd.DataFrame, index: int) -> Literal["up", "down", "range"]:
         swings = self.confirmed_swings_until(candles, index)
         highs = swings["highs"][-2:]

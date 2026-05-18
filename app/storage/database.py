@@ -362,15 +362,19 @@ class Database:
                     """
                     UPDATE paper_trades
                     SET option_symbol = COALESCE(NULLIF(%s, ''), option_symbol),
+                        option_entry_ltp = CASE
+                            WHEN %s IS NOT NULL AND (option_entry_ltp IS NULL OR option_entry_ltp <= 0)
+                                THEN %s
+                            ELSE option_entry_ltp
+                        END,
                         option_mark_ltp = COALESCE(%s, option_mark_ltp),
                         option_points = CASE
-                            WHEN %s IS NOT NULL AND option_entry_ltp IS NOT NULL AND option_entry_ltp > 0
-                                THEN ROUND(%s - option_entry_ltp, 2)
+                            WHEN %s IS NOT NULL AND COALESCE(option_entry_ltp, %s) IS NOT NULL AND COALESCE(option_entry_ltp, %s) > 0
+                                THEN ROUND(%s - COALESCE(option_entry_ltp, %s), 2)
                             ELSE option_points
                         END,
                         pnl_source = CASE
-                            WHEN %s IS NOT NULL AND option_entry_ltp IS NOT NULL AND option_entry_ltp > 0 THEN 'option_quote'
-                            WHEN %s IS NOT NULL THEN 'underlying_live'
+                            WHEN %s IS NOT NULL AND COALESCE(option_entry_ltp, %s) IS NOT NULL AND COALESCE(option_entry_ltp, %s) > 0 THEN 'option_quote'
                             ELSE pnl_source
                         END,
                         underlying_exit_price = COALESCE(%s, underlying_exit_price),
@@ -383,7 +387,13 @@ class Database:
                         mark_ltp,
                         mark_ltp,
                         mark_ltp,
-                        underlying_points,
+                        mark_ltp,
+                        mark_ltp,
+                        mark_ltp,
+                        mark_ltp,
+                        mark_ltp,
+                        mark_ltp,
+                        mark_ltp,
                         round(float(underlying_mark_price), 2) if underlying_mark_price is not None else None,
                         round(float(underlying_points), 2) if underlying_points is not None else None,
                         int(trade_id),

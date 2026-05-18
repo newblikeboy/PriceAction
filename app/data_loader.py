@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
+import requests
 
 from app.config import FYERS_AUTH_PATH, FyersConfig, fyers_config
 from app.options_pricing import option_snapshot_from_chain_payload, quote_symbol_candidates, to_float, to_int
 
 
 REQUIRED_COLUMNS = {"datetime", "open", "high", "low", "close"}
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
 class DataValidationError(ValueError):
@@ -126,6 +132,14 @@ class DataLoader:
             payload["secret_key"] = secret_key
         if redirect_uri and not self.cfg.redirect_uri:
             payload["redirect_uri"] = redirect_uri
+        if access_token:
+            access_meta = self.fyers_token_metadata(access_token, prefix="access_token")
+            payload.update(access_meta)
+            payload["token_generated_at_ist"] = (
+                access_meta.get("access_token_issued_at_ist") or self._format_ist_datetime(datetime.now(IST))
+            )
+        if refresh_token:
+            payload.update(self.fyers_token_metadata(refresh_token, prefix="refresh_token"))
         self.auth_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _load_fyers_auth_file(self) -> dict[str, Any]:
@@ -143,12 +157,80 @@ class DataLoader:
             auth["redirect_uri"] = self.cfg.redirect_uri
         return auth if any(auth.values()) else None
 
+    def fyers_auth_token_status(self) -> dict[str, Any]:
+        auth = self.load_fyers_auth() or {}
+        access_token = auth.get("access_token")
+        refresh_token = auth.get("refresh_token")
+        access_meta = self.fyers_token_metadata(access_token, prefix="access_token") if access_token else {}
+        refresh_meta = self.fyers_token_metadata(refresh_token, prefix="refresh_token") if refresh_token else {}
+        generated_at = (
+            auth.get("token_generated_at_ist")
+            or access_meta.get("access_token_issued_at_ist")
+            or auth.get("access_token_issued_at_ist")
+        )
+        return {
+            **access_meta,
+            **refresh_meta,
+            "token_generated_at_ist": generated_at,
+        }
+
+    @classmethod
+    def fyers_token_metadata(cls, token: str, prefix: str = "token") -> dict[str, Any]:
+        payload = cls._decode_jwt_payload(token)
+        issued_at = cls._timestamp_to_ist(payload.get("iat"))
+        expires_at = cls._timestamp_to_ist(payload.get("exp"))
+        expires_in_hours = cls._hours_until(payload.get("exp"))
+        return {
+            f"{prefix}_issued_at_ist": issued_at,
+            f"{prefix}_expires_at_ist": expires_at,
+            f"{prefix}_hours_remaining": expires_in_hours,
+        }
+
+    @staticmethod
+    def _decode_jwt_payload(token: str) -> dict[str, Any]:
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+            return json.loads(decoded)
+        except (IndexError, ValueError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def _timestamp_to_ist(value: Any) -> str | None:
+        try:
+            return DataLoader._format_ist_datetime(datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone(IST))
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
+    @staticmethod
+    def _format_ist_datetime(value: datetime) -> str:
+        return value.strftime("%d-%b-%Y %I:%M %p")
+
+    @staticmethod
+    def _hours_until(value: Any) -> float | None:
+        try:
+            expires_at = datetime.fromtimestamp(int(value), tz=timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+        remaining = (expires_at - datetime.now(timezone.utc)).total_seconds() / 3600
+        return round(remaining, 2)
+
     def fyers_app_credentials(self) -> dict[str, str]:
         auth = self.load_fyers_auth() or {}
         return {
             "client_id": auth.get("client_id") or self.cfg.client_id,
             "secret_key": auth.get("secret_key") or self.cfg.secret_key,
             "redirect_uri": auth.get("redirect_uri") or self.cfg.redirect_uri,
+        }
+
+    def fyers_totp_credentials(self) -> dict[str, str]:
+        return {
+            **self.fyers_app_credentials(),
+            "user_id": self.cfg.user_id,
+            "pin": self.cfg.pin,
+            "totp_key": self.cfg.totp_key,
+            "login_app_id": self.cfg.login_app_id or "2",
         }
 
     def build_fyers_auth_url(
@@ -214,6 +296,177 @@ class DataLoader:
             refresh_token=response.get("refresh_token"),
         )
         return response
+
+    def refresh_fyers_access_token_with_totp(self) -> dict[str, Any]:
+        credentials = self.fyers_totp_credentials()
+        client_id = credentials.get("client_id")
+        secret_key = credentials.get("secret_key")
+        redirect_uri = credentials.get("redirect_uri")
+        user_id = credentials.get("user_id")
+        pin = credentials.get("pin")
+        totp_key = credentials.get("totp_key")
+        login_app_id = credentials.get("login_app_id") or "2"
+        missing = [
+            name
+            for name, value in {
+                "FYERS_CLIENT_ID": client_id,
+                "FYERS_SECRET_KEY": secret_key,
+                "FYERS_REDIRECT_URI": redirect_uri,
+                "FYERS_USER_ID": user_id,
+                "FYERS_PIN": pin,
+                "FYERS_TOTP_KEY": totp_key,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(f"Missing Fyers TOTP configuration: {', '.join(missing)}")
+
+        try:
+            import pyotp
+        except ImportError as exc:
+            raise RuntimeError("Install pyotp to use Fyers TOTP automation") from exc
+
+        app_id, app_type = self._split_fyers_client_id(client_id)
+        request_key = self._fyers_post_json(
+            "https://api-t2.fyers.in/vagator/v2/send_login_otp",
+            {"fy_id": user_id, "app_id": login_app_id},
+            "Fyers send_login_otp",
+        ).get("request_key")
+        if not request_key:
+            raise RuntimeError("Fyers send_login_otp did not return request_key")
+
+        totp = pyotp.TOTP(totp_key).now()
+        request_key = self._fyers_post_json(
+            "https://api-t2.fyers.in/vagator/v2/verify_otp",
+            {"request_key": request_key, "otp": totp},
+            "Fyers verify_otp",
+        ).get("request_key")
+        if not request_key:
+            raise RuntimeError("Fyers verify_otp did not return request_key")
+
+        pin_response = self._fyers_post_json(
+            "https://api-t2.fyers.in/vagator/v2/verify_pin",
+            {"request_key": request_key, "identity_type": "pin", "identifier": pin},
+            "Fyers verify_pin",
+        )
+        login_access_token = self._find_fyers_access_token(pin_response)
+        if not login_access_token:
+            raise RuntimeError("Fyers verify_pin did not return login access token")
+
+        auth_code_response = self._fyers_post_json(
+            "https://api-t1.fyers.in/api/v3/token",
+            {
+                "fyers_id": user_id,
+                "app_id": app_id,
+                "redirect_uri": redirect_uri,
+                "appType": app_type,
+                "code_challenge": "",
+                "state": "price-action-ai",
+                "scope": "",
+                "nonce": "",
+                "response_type": "code",
+                "create_cookie": True,
+            },
+            "Fyers token",
+            headers={"Authorization": f"Bearer {login_access_token}"},
+            allowed_statuses={200, 308},
+            allow_redirects=False,
+        )
+        auth_code = self._extract_fyers_auth_code(auth_code_response)
+        if not auth_code:
+            raise RuntimeError(f"Fyers token did not return auth_code: {auth_code_response}")
+
+        return self._validate_and_save_fyers_auth_code(
+            auth_code=auth_code,
+            client_id=client_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+        )
+
+    def _validate_and_save_fyers_auth_code(
+        self,
+        auth_code: str,
+        client_id: str,
+        secret_key: str,
+        redirect_uri: str,
+    ) -> dict[str, Any]:
+        response = self._fyers_post_json(
+            "https://api-t1.fyers.in/api/v3/validate-authcode",
+            {
+                "grant_type": "authorization_code",
+                "appIdHash": hashlib.sha256(f"{client_id}:{secret_key}".encode("utf-8")).hexdigest(),
+                "code": auth_code,
+            },
+            "Fyers validate-authcode",
+        )
+        if response.get("s") == "error" or not response.get("access_token"):
+            raise RuntimeError(f"Fyers token validation failed: {response}")
+        self.save_fyers_auth(
+            client_id=client_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+            access_token=response.get("access_token"),
+            refresh_token=response.get("refresh_token"),
+        )
+        return response
+
+    @staticmethod
+    def _split_fyers_client_id(client_id: str) -> tuple[str, str]:
+        if "-" not in client_id:
+            raise RuntimeError("FYERS_CLIENT_ID must be in APP_ID-APP_TYPE format, for example ABCD1234-100")
+        app_id, app_type = client_id.rsplit("-", 1)
+        if not app_id or not app_type:
+            raise RuntimeError("FYERS_CLIENT_ID must be in APP_ID-APP_TYPE format")
+        return app_id, app_type
+
+    @staticmethod
+    def _find_fyers_access_token(payload: dict[str, Any]) -> str | None:
+        if isinstance(payload.get("access_token"), str):
+            return payload["access_token"]
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("access_token"), str):
+            return data["access_token"]
+        return None
+
+    @staticmethod
+    def _extract_fyers_auth_code(payload: dict[str, Any]) -> str | None:
+        for key in ("auth_code", "code"):
+            if isinstance(payload.get(key), str):
+                return payload[key]
+        url = payload.get("Url") or payload.get("url") or payload.get("redirect_url")
+        if isinstance(url, str):
+            parsed = parse_qs(urlparse(url).query)
+            values = parsed.get("auth_code") or parsed.get("code")
+            if values:
+                return values[0]
+        return None
+
+    @staticmethod
+    def _fyers_post_json(
+        url: str,
+        payload: dict[str, Any],
+        label: str,
+        headers: dict[str, str] | None = None,
+        allowed_statuses: set[int] | None = None,
+        allow_redirects: bool = True,
+    ) -> dict[str, Any]:
+        allowed_statuses = allowed_statuses or {200}
+        response = requests.post(
+            url=url,
+            json=payload,
+            headers=headers,
+            timeout=20,
+            allow_redirects=allow_redirects,
+        )
+        if response.status_code not in allowed_statuses:
+            raise RuntimeError(f"{label} failed with HTTP {response.status_code}: {response.text}")
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"{label} returned non-JSON response: {response.text}") from exc
+        if result.get("s") == "error":
+            raise RuntimeError(f"{label} failed: {result}")
+        return result
 
     def fyers_client(self):
         auth = self.load_fyers_auth()

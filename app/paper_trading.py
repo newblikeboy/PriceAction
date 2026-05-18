@@ -16,6 +16,16 @@ class PaperTradeEngine:
     def create_trade(self, signal: SignalCandidate) -> PaperTrade:
         trade = PaperTrade.from_signal(signal)
         trade.underlying_entry_price = trade.entry_index_price
+        selected = trade.features.get("selected_option_contract") if isinstance(trade.features, dict) else None
+        if isinstance(selected, dict):
+            trade.option_symbol = str(selected.get("symbol") or "").strip() or None
+            trade.option_side = str(selected.get("side") or trade.direction).strip() or trade.direction
+            strike = selected.get("strike")
+            try:
+                trade.option_strike = round(float(strike), 2)
+            except (TypeError, ValueError):
+                trade.option_strike = None
+            trade.pnl_source = "underlying_backtest"
         return trade
 
     def update_open_trade_with_quote(self, trade: PaperTrade, quote_price: float, quote_time: datetime | None = None) -> PaperTrade:

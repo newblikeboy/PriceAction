@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.backtest import BacktestRunner
+from app.config import config
 from app.data_loader import DataLoader
 from app.storage.database import Database
 from app.storage.logger import TradeLogger
@@ -44,7 +45,8 @@ class StrategyService:
             if progress_callback:
                 progress_callback({"percent": 0, "current_step": "Resampling 5m candles"})
             candles_5m = self.loader.resample_from_1m(candles_1m).candles_5m
-        result = self.runner.run(candles_5m, candles_1m, progress_callback=progress_callback)
+        option_snapshot = self._live_option_snapshot_for_backtest(progress_callback)
+        result = self.runner.run(candles_5m, candles_1m, progress_callback=progress_callback, option_snapshot=option_snapshot)
         if progress_callback:
             progress_callback(
                 {
@@ -60,3 +62,16 @@ class StrategyService:
             "trades": [trade.to_dict() for trade in result.trades],
             "skipped_signals": [signal.to_dict() for signal in result.skipped_signals],
         }
+
+    def _live_option_snapshot_for_backtest(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any] | None:
+        if not config.option_selection_enabled:
+            return None
+        if progress_callback:
+            progress_callback({"percent": 0, "current_step": "Loading live option chain for strike metadata"})
+        try:
+            return self.loader.fetch_fyers_option_snapshot("NSE:NIFTY50-INDEX", config.option_selection_strikecount)
+        except Exception:
+            return None
