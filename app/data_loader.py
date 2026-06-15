@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -22,13 +21,6 @@ IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 class DataValidationError(ValueError):
     pass
-
-
-@dataclass
-class CandleBundle:
-    candles_1m: pd.DataFrame
-    candles_5m: pd.DataFrame
-    candles_15m: pd.DataFrame
 
 
 class DataLoader:
@@ -68,6 +60,45 @@ class DataLoader:
         candles["time"] = candles.index.strftime("%H:%M")
         return candles
 
+    def session_candles(
+        self,
+        candles: pd.DataFrame,
+        start: str = "09:15",
+        end: str = "15:30",
+    ) -> pd.DataFrame:
+        frame = candles.copy()
+        if "datetime" in frame.columns:
+            frame["datetime"] = pd.to_datetime(frame["datetime"])
+            frame = frame.set_index("datetime")
+        if "time" not in frame.columns:
+            frame["time"] = frame.index.strftime("%H:%M")
+        if "date" not in frame.columns:
+            frame["date"] = frame.index.date
+        return frame[(frame["time"] >= start) & (frame["time"] <= end)].copy()
+
+    def missing_candle_times(
+        self,
+        candles: pd.DataFrame,
+        timeframe: str = "5min",
+        start: str = "09:15",
+        end: str = "15:30",
+    ) -> list[pd.Timestamp]:
+        session = self.session_candles(candles, start=start, end=end)
+        if session.empty:
+            return []
+        missing: list[pd.Timestamp] = []
+        for trading_date in sorted(session["date"].unique()):
+            day = session[session["date"] == trading_date]
+            expected = pd.date_range(
+                f"{trading_date} {start}",
+                f"{trading_date} {end}",
+                freq=timeframe,
+                inclusive="left",
+            )
+            present = pd.DatetimeIndex(pd.to_datetime(day.index))
+            missing.extend(expected.difference(present).to_list())
+        return missing
+
     def _parse_datetime_column(self, values: pd.Series) -> pd.Series:
         formats = [
             "%Y-%m-%d %H:%M:%S",
@@ -90,26 +121,6 @@ class DataLoader:
             bad_examples = source.loc[parsed.isna()].head(3).to_list()
             raise DataValidationError(f"Invalid datetime values: {bad_examples}")
         return parsed
-
-    def resample_from_1m(self, candles_1m: pd.DataFrame) -> CandleBundle:
-        base = candles_1m.copy()
-        if "volume" not in base.columns:
-            base["volume"] = 0
-
-        def resample(rule: str) -> pd.DataFrame:
-            out = base.resample(rule, label="left", closed="left").agg(
-                open=("open", "first"),
-                high=("high", "max"),
-                low=("low", "min"),
-                close=("close", "last"),
-                volume=("volume", "sum"),
-            )
-            out = out.dropna(subset=["open", "high", "low", "close"])
-            out["date"] = out.index.date
-            out["time"] = out.index.strftime("%H:%M")
-            return out
-
-        return CandleBundle(candles_1m=base, candles_5m=resample("5min"), candles_15m=resample("15min"))
 
     def save_fyers_auth(
         self,

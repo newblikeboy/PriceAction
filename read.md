@@ -24,18 +24,16 @@
   - Quote, historical, and socket functions are backend-only now and are not exposed as frontend controls.
   - FYERS socket is restricted to NSE market hours only: 09:15 to 15:30 IST on weekdays.
 - MySQL candle storage:
-  - `nifty_index_candles_1m`
   - `nifty_index_candles_5m`
-  - `nifty_index_candles_15m`
 - Database backtest flow:
   - User console backtest now runs from MySQL candles instead of CSV upload.
   - The old CSV upload UI has been removed.
 - Paper-trading-only architecture. There are no live broker order placement routes or methods.
-- CSV 1m candle upload and backtest runner.
+- CSV 5m candle backtest runner.
 - Modular rule engines:
-  - `DataLoader` for CSV validation, 1m to 5m/15m resampling, Fyers auth, and quote fetch.
+  - `DataLoader` for 5m CSV validation, Fyers auth, and quote fetch.
   - `LevelEngine` for PDH, PDL, PDC, ORH, ORL, swings, day high/low, and round levels.
-  - `StructureEngine` for confirmed swings, trend, BOS, CHoCH/MSS classification, and 1m confirmation.
+  - `StructureEngine` for confirmed swings, trend, BOS, CHoCH/MSS classification, and 5m confirmation.
   - `DisplacementEngine` for bullish/bearish displacement rules.
   - `HTFBiasEngine` for non-lookahead 15m and 60m-equivalent directional bias from completed 5m candles.
   - `PremiumDiscountEngine` for dealing-range premium/equilibrium/discount filtering.
@@ -44,7 +42,7 @@
   - `OrderBlockEngine` for last opposite candle order-block zones and retests.
   - `SignalEngine` for OR breakout, liquidity sweep reversal, and OB retest continuation candidates.
   - `RiskEngine` for candle/structure-based SL, liquidity target, minimum 1:2 RR, and setup score.
-  - `PaperTradeEngine` for trade creation, 1m candle simulation exits, quote-based updates, MFE, MAE, and R multiples.
+  - `PaperTradeEngine` for trade creation, 5m candle simulation exits, quote-based updates, MFE, MAE, and R multiples.
   - `TradeLogger` for paper trades, skipped signals, and ML-ready feature persistence in SQLite.
   - `BacktestRunner` for multi-day simulation and summary stats.
 - Aiven Cloud MySQL persistence through `PyMySQL`.
@@ -59,7 +57,7 @@
 
 ## Implemented Setup Coverage
 
-- Opening Range breakout/breakdown continuation with HTF bias and premium/discount filtering, displacement, BOS/CHoCH/MSS, 1m confirmation, FVG context, internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
+- Opening Range breakout/breakdown continuation with HTF bias and premium/discount filtering, displacement, BOS/CHoCH/MSS, 5m confirmation, FVG context, internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
 - Liquidity sweep reversal with HTF bias and premium/discount filtering, sweep detection, next-5m confirmation, BOS/CHoCH/MSS, optional OB/FVG context, inducement/internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
 - Late liquidity target reversal after 11:00 with fresh liquidity-level touch, rejection candle, next-5m confirmation, HTF bias, premium/discount filtering, FVG/structure context, inducement/internal/external liquidity context, candle SL, liquidity target, RR validation, and scoring.
 - Order-block retest continuation after displacement and BOS.
@@ -141,7 +139,7 @@ Backtests now read candles from MySQL. Use the one-time FYERS backfill script fi
 python -m app.scripts.backfill_nifty_history --days 60
 ```
 
-This fetches Nifty index 1m candles from FYERS, stores them in MySQL, and writes resampled 5m and 15m candles.
+This fetches Nifty index 5m candles from FYERS and stores only 5m candles in MySQL.
 
 ## Safety Rule
 

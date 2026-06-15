@@ -26,6 +26,7 @@
   const latestAverageR = document.getElementById("latest-average-r");
   const latestSkipped = document.getElementById("latest-skipped");
   const latestBacktestError = document.getElementById("latest-backtest-error");
+  const latestBacktestTradesBody = document.getElementById("latest-backtest-trades-body");
   let backtestPollTimer = null;
   const viewStorageKey = `priceAction.activeView.${window.location.pathname}`;
 
@@ -158,6 +159,45 @@
     }
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function renderBacktestTrades(trades) {
+    if (!latestBacktestTradesBody) {
+      return;
+    }
+    if (!Array.isArray(trades) || trades.length === 0) {
+      latestBacktestTradesBody.innerHTML = '<tr><td colspan="16" class="small">No trades for the latest backtest run yet.</td></tr>';
+      return;
+    }
+    latestBacktestTradesBody.innerHTML = trades.map(function (trade, index) {
+      return `<tr>
+        <td>${index + 1}</td>
+        <td>${escapeHtml(trade.date)}</td>
+        <td>${escapeHtml(trade.entry_time)}</td>
+        <td>${escapeHtml(trade.exit_time || "--")}</td>
+        <td>${escapeHtml(trade.direction)}</td>
+        <td class="truncate-cell wide-truncate" title="${escapeHtml(trade.setup_type)}">${escapeHtml(trade.setup_type)}</td>
+        <td>${escapeHtml(trade.entry_index_price)}</td>
+        <td>${escapeHtml(trade.sl_index_price)}</td>
+        <td>${escapeHtml(trade.target_index_price)}</td>
+        <td>${escapeHtml(trade.exit_index_price || "--")}</td>
+        <td>${escapeHtml(trade.exit_reason || "--")}</td>
+        <td>${escapeHtml(trade.result || "--")}</td>
+        <td>${escapeHtml(trade.points == null ? "" : trade.points)}</td>
+        <td>${escapeHtml(trade.r_multiple == null ? "" : trade.r_multiple)}</td>
+        <td>${escapeHtml(trade.setup_score == null ? "" : trade.setup_score)}</td>
+        <td class="truncate-cell reason-cell" title="${escapeHtml(trade.reason || "")}">${escapeHtml(trade.reason || "--")}</td>
+      </tr>`;
+    }).join("");
+  }
+
   function formatPercent(value) {
     const number = Number(value || 0);
     return `${Math.max(0, Math.min(100, number)).toFixed(2)}%`;
@@ -187,6 +227,7 @@
     setText(latestAverageR, String(summary.average_points || 0));
     setText(latestSkipped, String(run.skipped_count || 0));
     setText(latestBacktestError, run.error_message || "");
+    renderBacktestTrades(run.trades || []);
     if (backtestSubmit) {
       backtestSubmit.disabled = status === "running";
       backtestSubmit.textContent = status === "running" ? "Backtest Running" : "Run DB Backtest";

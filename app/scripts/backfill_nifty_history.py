@@ -43,38 +43,35 @@ def run_backfill(days: int = 60, symbol: str = FYERS_NIFTY_INDEX, db_symbol: str
     for chunk_start, chunk_end in date_chunks(start, end):
         frame = loader.fetch_fyers_history(
             symbol=symbol,
-            resolution="1",
+            resolution="5",
             range_from=chunk_start.isoformat(),
             range_to=chunk_end.isoformat(),
         )
         parts.append(frame)
-        print(f"Fetched {len(frame)} 1m rows from {chunk_start} to {chunk_end}")
+        print(f"Fetched {len(frame)} 5m rows from {chunk_start} to {chunk_end}")
 
     non_empty_parts = [part for part in parts if not part.empty]
-    candles_1m = normalize_history(pd.concat(non_empty_parts, ignore_index=True) if non_empty_parts else pd.DataFrame())
-    if candles_1m.empty:
-        raise RuntimeError("FYERS returned no Nifty 1m candles")
+    candles_5m = normalize_history(pd.concat(non_empty_parts, ignore_index=True) if non_empty_parts else pd.DataFrame())
+    if candles_5m.empty:
+        raise RuntimeError("FYERS returned no Nifty 5m candles")
 
-    validated_1m = loader.validate_candles(candles_1m, "1m")
-    bundle = loader.resample_from_1m(validated_1m)
+    validated_5m = loader.validate_candles(candles_5m, "5m")
 
-    rows_1m = database.upsert_candles("1m", db_symbol, candles_1m)
-    rows_5m = database.upsert_candles("5m", db_symbol, bundle.candles_5m)
-    rows_15m = database.upsert_candles("15m", db_symbol, bundle.candles_15m)
+    rows_5m = database.upsert_candles("5m", db_symbol, validated_5m)
     counts = database.candle_counts(db_symbol)
     return {
         "symbol": db_symbol,
         "source_symbol": symbol,
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "source_1m_rows": len(candles_1m),
-        "upserted": {"1m": rows_1m, "5m": rows_5m, "15m": rows_15m},
+        "source_5m_rows": len(candles_5m),
+        "upserted": {"5m": rows_5m},
         "database_counts": counts,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Backfill Nifty index candles from FYERS into MySQL.")
+    parser = argparse.ArgumentParser(description="Backfill Nifty index 5m candles from FYERS into MySQL.")
     parser.add_argument("--days", type=int, default=60, help="Calendar days to backfill. Default: 60.")
     parser.add_argument("--symbol", default=FYERS_NIFTY_INDEX, help="FYERS symbol. Default: NSE:NIFTY50-INDEX.")
     parser.add_argument("--db-symbol", default=DB_SYMBOL, help="Database symbol. Default: NIFTY.")

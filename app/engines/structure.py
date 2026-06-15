@@ -84,8 +84,8 @@ class StructureEngine:
                 return "down"
         return "range"
 
-    def one_min_confirmation(self, candles_1m: pd.DataFrame, until_time, direction: str, lookback: int = 8) -> bool:
-        window = candles_1m[candles_1m.index <= until_time].tail(lookback)
+    def five_min_confirmation(self, candles_5m: pd.DataFrame, until_time, direction: str, lookback: int = 4) -> bool:
+        window = candles_5m[candles_5m.index <= until_time].tail(lookback)
         if len(window) < 4:
             return False
         highs = window["high"].tail(4).to_list()

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Nifty Price Action Admin Console</title>
-  <link rel="stylesheet" href="/static/finalpt/styles.css?v=live-fast-1">
+  <link rel="stylesheet" href="/static/finalpt/styles.css?v=replay-fit-2">
 </head>
 <body class="dashboard-body">
   <div class="ambient-glow ambient-a"></div>
@@ -50,6 +50,8 @@
       <nav class="side-nav" aria-label="Sections">
         <button type="button" class="side-nav-btn is-active" data-view-target="home">Overview</button>
         <button type="button" class="side-nav-btn" data-view-target="chart">Live Chart</button>
+        <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
+        <button type="button" class="side-nav-btn" data-view-target="replay">Replay Bar</button>
         <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
@@ -84,9 +86,7 @@
           <article class="card stat-card"><p class="label">Skipped</p><h2>{{ skipped|length }}</h2></article>
         </section>
         <section class="grid top-grid">
-          <article class="card stat-card"><p class="label">Nifty 1m Candles</p><h2>{{ candle_counts["1m"] }}</h2></article>
           <article class="card stat-card"><p class="label">Nifty 5m Candles</p><h2>{{ candle_counts["5m"] }}</h2></article>
-          <article class="card stat-card"><p class="label">Nifty 15m Candles</p><h2>{{ candle_counts["15m"] }}</h2></article>
         </section>
 
         <section class="card preflight-card">
@@ -122,9 +122,7 @@
               <h2>Nifty 90-Day Candle View</h2>
             </div>
             <div class="chart-controls" aria-label="Timeframe controls">
-              <button type="button" class="ghost-btn tf-btn is-active" data-chart-timeframe="1m">1m</button>
-              <button type="button" class="ghost-btn tf-btn" data-chart-timeframe="5m">5m</button>
-              <button type="button" class="ghost-btn tf-btn" data-chart-timeframe="15m">15m</button>
+              <button type="button" class="ghost-btn tf-btn is-active" data-chart-timeframe="5m">5m</button>
             </div>
           </div>
 
@@ -177,6 +175,173 @@
         </section>
       </section>
 
+      <section class="portal-view" data-view="backtest" hidden>
+        <article class="card view-card">
+          <div class="line-head">
+            <div>
+              <p class="label">Admin Backtest</p>
+              <h2>Database Backtest</h2>
+            </div>
+            <span id="backtest-status-chip" class="status-chip">{{ latest_backtest.status if latest_backtest else "idle" }}</span>
+          </div>
+          <p class="small">Runs the current smart-zone trade engine from stored 5m MySQL candles and writes a full audit table for the latest run.</p>
+          <form id="backtest-form" method="post" action="/backtest" class="backtest-form admin-backtest-form">
+            <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
+            <label class="field"><span>Start Date</span><input class="text-input" type="date" name="start_date"></label>
+            <label class="field"><span>End Date</span><input class="text-input" type="date" name="end_date"></label>
+            <button id="backtest-submit" class="action-btn" type="submit">Run DB Backtest</button>
+          </form>
+        </article>
+
+        <article class="card view-card backtest-progress-card">
+          <div class="line-head">
+            <h2>Run Progress</h2>
+            <strong id="backtest-progress-text" class="mono">{{ latest_backtest.progress_pct|round(2) if latest_backtest else 0 }}%</strong>
+          </div>
+          <div class="progress-track" aria-label="Backtest progress">
+            <div id="backtest-progress-fill" class="progress-fill" style="width: {{ latest_backtest.progress_pct if latest_backtest else 0 }}%"></div>
+          </div>
+          <p id="backtest-current-step" class="small">{{ latest_backtest.current_step if latest_backtest else "No backtest has been started yet." }}</p>
+        </article>
+
+        <article class="card view-card latest-backtest-card">
+          <div class="line-head"><h2>Latest Backtest Result</h2><span id="latest-backtest-id" class="status-chip">#{{ latest_backtest.id if latest_backtest else "--" }}</span></div>
+          <div class="paper-table-wrap backtest-summary-table-wrap">
+            <table class="paper-table backtest-summary-table">
+              <thead>
+                <tr>
+                  <th>Status</th><th>Total Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total Points</th><th>Avg Points</th><th>Skipped</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td id="latest-backtest-status">{{ latest_backtest.status if latest_backtest else "No run" }}</td>
+                  <td id="latest-total-trades">{{ latest_backtest.summary.get("total_trades", 0) if latest_backtest else 0 }}</td>
+                  <td id="latest-wins">{{ latest_backtest.summary.get("wins", 0) if latest_backtest else 0 }}</td>
+                  <td id="latest-losses">{{ latest_backtest.summary.get("losses", 0) if latest_backtest else 0 }}</td>
+                  <td id="latest-win-rate">{{ latest_backtest.summary.get("win_rate", 0) if latest_backtest else 0 }}%</td>
+                  <td id="latest-total-r">{{ latest_backtest.summary.get("total_points", 0) if latest_backtest else 0 }}</td>
+                  <td id="latest-average-r">{{ latest_backtest.summary.get("average_points", 0) if latest_backtest else 0 }}</td>
+                  <td id="latest-skipped">{{ latest_backtest.skipped_count if latest_backtest else 0 }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head">
+            <div>
+              <p class="label">Trade Audit</p>
+              <h2>Full Backtest Trade Table</h2>
+            </div>
+          </div>
+          <div class="paper-table-wrap backtest-trade-table-wrap">
+            <table class="paper-table backtest-trade-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Exit Reason</th><th>Result</th><th>Points</th><th>R</th><th>Score</th><th>Why Trade</th>
+                </tr>
+              </thead>
+              <tbody id="latest-backtest-trades-body">
+                {% if latest_backtest and latest_backtest.trades %}
+                {% for trade in latest_backtest.trades %}
+                <tr>
+                  <td>{{ loop.index }}</td><td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
+                  <td class="truncate-cell wide-truncate" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td>
+                  <td>{{ trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.exit_index_price or "--" }}</td>
+                  <td>{{ trade.exit_reason or "--" }}</td><td>{{ trade.result or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.r_multiple if trade.r_multiple is not none else "" }}</td><td>{{ trade.setup_score if trade.setup_score is not none else "" }}</td>
+                  <td class="truncate-cell reason-cell" title="{{ trade.reason }}">{{ trade.reason or "--" }}</td>
+                </tr>
+                {% endfor %}
+                {% else %}
+                <tr><td colspan="16" class="small">No trades for the latest backtest run yet.</td></tr>
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="replay" hidden>
+        <article class="card view-card">
+          <div class="line-head">
+            <div>
+              <p class="label">Replay Bar</p>
+              <h2>Bar Replay Backtesting</h2>
+            </div>
+            <span id="replay-status-chip" class="status-chip">not loaded</span>
+          </div>
+          <p class="small">Loads selected 5m candles into memory, uses the previous 4 trading days as hidden engine context, then reveals one selected candle at a time with smart zones and replay trades.</p>
+          <form id="replay-load-form" class="backtest-form replay-load-form">
+            <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
+            <label class="field"><span>From Date</span><input class="text-input" type="date" name="start_date" required></label>
+            <label class="field"><span>To Date</span><input class="text-input" type="date" name="end_date" required></label>
+            <label class="field"><span>Context Days</span><input class="text-input" type="number" name="context_trading_days" value="4" min="0" max="20"></label>
+            <button id="replay-load-btn" class="action-btn" type="submit">Load Replay</button>
+          </form>
+          <div class="action-row replay-controls">
+            <button id="replay-prev-btn" class="ghost-btn" type="button" disabled>Previous</button>
+            <button id="replay-next-btn" class="action-btn" type="button" disabled>Next Candle</button>
+            <button id="replay-play-btn" class="ghost-btn" type="button" disabled>Play</button>
+            <button id="replay-reset-btn" class="ghost-btn" type="button" disabled>Reset</button>
+            <label class="field replay-speed-field"><span>Speed</span><input id="replay-speed-input" class="text-input" type="number" value="700" min="150" max="3000" step="50"></label>
+          </div>
+          <p id="replay-message" class="small"></p>
+        </article>
+
+        <article class="card chart-panel-card replay-chart-card">
+          <div class="line-head chart-head">
+            <div>
+              <p class="label">Replay Chart</p>
+              <h2 id="replay-chart-title">Load a date range to start</h2>
+            </div>
+            <strong id="replay-candle-counter" class="mono">0 / 0</strong>
+          </div>
+          <div class="chart-stage replay-chart-stage">
+            <div id="admin-replay-chart" class="live-chart tradingview-like-chart"></div>
+          </div>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Replay Summary</h2><span id="replay-open-state" class="status-chip">flat</span></div>
+          <div class="paper-table-wrap backtest-summary-table-wrap">
+            <table class="paper-table backtest-summary-table">
+              <thead>
+                <tr><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total Points</th><th>Avg Points</th><th>Total R</th><th>Current Price</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td id="replay-summary-trades">0</td><td id="replay-summary-wins">0</td><td id="replay-summary-losses">0</td><td id="replay-summary-win-rate">0%</td>
+                  <td id="replay-summary-points">0</td><td id="replay-summary-average">0</td><td id="replay-summary-r">0</td><td id="replay-current-price">--</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Replay Trades</h2></div>
+          <div class="paper-table-wrap replay-table-wrap">
+            <table class="paper-table replay-trade-table">
+              <thead><tr><th>#</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Result</th><th>Points</th><th>R</th><th>Why Trade</th></tr></thead>
+              <tbody id="replay-trades-body"><tr><td colspan="14" class="small">No replay trades yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Replay Skipped Signals</h2></div>
+          <div class="paper-table-wrap replay-table-wrap">
+            <table class="paper-table replay-skipped-table">
+              <thead><tr><th>Date</th><th>Time</th><th>Side</th><th>Setup</th><th>Reason</th></tr></thead>
+              <tbody id="replay-skipped-body"><tr><td colspan="5" class="small">No skipped replay signals yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
       <section class="portal-view" data-view="paper" hidden>
         <section class="grid paper-grid">
           <article class="card">
@@ -227,8 +392,9 @@
     </main>
   </div>
 
-  <script src="/static/finalpt/panel.js?v=points-1"></script>
+  <script src="/static/finalpt/panel.js?v=admin-backtest-fit-1"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/finalpt/admin-chart.js?v=live-fast-1"></script>
+  <script src="/static/finalpt/admin-chart.js?v=zone-ranges-4"></script>
+  <script src="/static/finalpt/admin-replay.js?v=replay-context-days-1"></script>
 </body>
 </html>

@@ -23,6 +23,67 @@ class LevelSet:
     day_low: float | None = None
 
 
+ZoneStatus = Literal["fresh", "active", "tested", "weakened", "broken", "flipped"]
+
+
+@dataclass
+class SmartZone:
+    zone_id: str
+    zone_type: str
+    low: float
+    high: float
+    midpoint: float
+    created_at: Any
+    last_touched_at: Any | None
+    touch_count: int
+    reaction_count: int
+    break_count: int
+    score: float
+    freshness_score: float
+    recency_score: float
+    reaction_score: float
+    speed_score: float
+    touch_quality_score: float
+    htf_visibility_score: float
+    volume_score: float
+    gap_overlap_score: float
+    liquidity_sweep_score: float
+    noise_penalty: float
+    status: ZoneStatus
+    notes: list[str] = field(default_factory=list)
+    enhancers: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["created_at"] = str(self.created_at) if self.created_at is not None else None
+        payload["last_touched_at"] = str(self.last_touched_at) if self.last_touched_at is not None else None
+        return payload
+
+
+@dataclass
+class SmartLevelResult:
+    current_price: float
+    atr: float
+    zones: list[SmartZone]
+    nearest_support_demand: list[SmartZone]
+    nearest_resistance_supply: list[SmartZone]
+    strongest_zones: list[SmartZone]
+    recently_touched_zones: list[SmartZone]
+    fresh_untested_zones: list[SmartZone]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current_price": round(float(self.current_price), 2),
+            "atr": round(float(self.atr), 2),
+            "zones": [zone.to_dict() for zone in self.zones],
+            "nearest_support_demand": [zone.to_dict() for zone in self.nearest_support_demand],
+            "nearest_resistance_supply": [zone.to_dict() for zone in self.nearest_resistance_supply],
+            "strongest_zones": [zone.to_dict() for zone in self.strongest_zones],
+            "recently_touched_zones": [zone.to_dict() for zone in self.recently_touched_zones],
+            "fresh_untested_zones": [zone.to_dict() for zone in self.fresh_untested_zones],
+        }
+
+
 @dataclass
 class SignalCandidate:
     date: str

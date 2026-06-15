@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
+import pandas as pd
 
 from app.config import BASE_DIR, config
 from app.data_loader import DataLoader
@@ -31,6 +32,7 @@ from app.engines.signals import SignalEngine
 from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_market_hours_status
 from app.options_pricing import select_option_contract, to_float, to_int
 from app.paper_trading import PaperTradeEngine
+from app.replay import ReplayBarSession
 from app.services import StrategyService
 from app.storage.database import Database
 
@@ -47,6 +49,8 @@ _socket_session: FyersSocketSession | None = None
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
 _backtest_job_lock = threading.Lock()
 _backtest_job: dict[str, Any] = {}
+_replay_lock = threading.RLock()
+_replay_sessions: dict[str, ReplayBarSession] = {}
 IST = ZoneInfo("Asia/Kolkata")
 FYERS_NIFTY_INDEX = "NSE:NIFTY50-INDEX"
 _chart_cache_lock = threading.Lock()
@@ -121,6 +125,18 @@ class LoginPayload(BaseModel):
     username: str | None = None
     password: str
     role: str | None = "user"
+
+
+class ReplayLoadPayload(BaseModel):
+    symbol: str = "NIFTY"
+    start_date: str
+    end_date: str
+    warmup_candles: int = 30
+    context_trading_days: int = 4
+
+
+class ReplayStepPayload(BaseModel):
+    count: int = 1
 
 
 def get_db() -> Database:
@@ -558,6 +574,18 @@ def json_payload(value: Any) -> dict[str, Any]:
     return {}
 
 
+def json_list_payload(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            data = json.loads(value)
+            return list(data) if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
 def active_trade_text(trades: list[dict[str, Any]]) -> str:
     for trade in trades:
         if str(trade.get("status") or "").upper() == "OPEN":
@@ -616,12 +644,80 @@ def public_backtest_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def backtest_trade_reason(trade: dict[str, Any]) -> str:
+    notes = [str(item) for item in json_list_payload(trade.get("notes_json")) if str(item).strip()]
+    if notes:
+        return " | ".join(notes)
+    features = json_payload(trade.get("features_json"))
+    reason = features.get("reason_for_entry")
+    if isinstance(reason, dict):
+        model = reason.get("entry_model") or features.get("entry_model")
+        target = reason.get("target") if isinstance(reason.get("target"), dict) else {}
+        target_name = target.get("name") if isinstance(target, dict) else None
+        zone = reason.get("zone") if isinstance(reason.get("zone"), dict) else {}
+        zone_label = zone.get("zone_type") if isinstance(zone, dict) else None
+        parts = [str(item) for item in (model, zone_label, target_name) if item]
+        if parts:
+            return " | ".join(parts)
+    zone_type = features.get("smart_zone_type")
+    zone_low = features.get("smart_zone_low")
+    zone_high = features.get("smart_zone_high")
+    zone_score = features.get("smart_zone_score")
+    if zone_type:
+        return f"Smart zone {zone_type} {zone_low}-{zone_high}, score {zone_score}"
+    return ""
+
+
+def public_backtest_trade(trade: dict[str, Any]) -> dict[str, Any]:
+    item = enrich_trade_points(dict(trade))
+    return {
+        "id": item.get("id"),
+        "date": str(item.get("date")) if item.get("date") else "",
+        "entry_time": item.get("entry_time") or "",
+        "exit_time": item.get("exit_time") or "",
+        "direction": item.get("direction") or "",
+        "setup_type": item.get("setup_type") or "",
+        "entry_index_price": item.get("entry_index_price"),
+        "sl_index_price": item.get("sl_index_price"),
+        "target_index_price": item.get("target_index_price"),
+        "exit_index_price": item.get("exit_index_price"),
+        "exit_reason": item.get("exit_reason") or "",
+        "result": item.get("result") or item.get("status") or "",
+        "points": item.get("points"),
+        "r_multiple": item.get("r_multiple"),
+        "setup_score": item.get("setup_score"),
+        "risk_reward": item.get("risk_reward"),
+        "reason": backtest_trade_reason(item),
+    }
+
+
+def latest_backtest_trades(limit: int = 1000, run: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    latest = run or get_db().latest_backtest_run()
+    if not latest or not latest.get("id"):
+        return []
+    db = get_db()
+    trades = db.list_backtest_trades(int(latest["id"]), limit=limit)
+    if not trades and latest.get("start_date") and latest.get("end_date"):
+        trades = db.list_trades_between(
+            str(latest["start_date"]),
+            str(latest["end_date"]),
+            symbol=str(latest.get("symbol") or "NIFTY"),
+            limit=limit,
+        )
+    return [public_backtest_trade(trade) for trade in trades]
+
+
 def current_backtest_payload() -> dict[str, Any]:
     with _backtest_job_lock:
         active_job = dict(_backtest_job) if _backtest_job.get("status") == "running" else None
     if active_job:
+        active_job["trades"] = latest_backtest_trades(run=active_job)
         return {"active": True, "latest": active_job}
-    return {"active": False, "latest": public_backtest_run(get_db().latest_backtest_run())}
+    raw_latest = get_db().latest_backtest_run()
+    latest = public_backtest_run(raw_latest)
+    if latest:
+        latest["trades"] = latest_backtest_trades(run=raw_latest)
+    return {"active": False, "latest": latest}
 
 
 def decode_jwt_payload(token: str | None) -> dict[str, Any]:
@@ -730,7 +826,7 @@ def admin_preflight() -> dict[str, Any]:
             if missing:
                 add(preflight_item("Candle Data", "bad", f"Missing candles for: {', '.join(missing)}.", "Run FYERS backfill."))
             else:
-                add(preflight_item("Candle Data", "ok", f"Loaded 1m={counts['1m']}, 5m={counts['5m']}, 15m={counts['15m']}.", ""))
+                add(preflight_item("Candle Data", "ok", f"Loaded 5m={counts['5m']}.", ""))
         except Exception as exc:
             add(preflight_item("Candle Data", "warn", f"Could not verify candle counts: {exc}", "Check MySQL tables."))
     except Exception as exc:
@@ -815,6 +911,7 @@ def run_backtest_job(run_id: int, symbol: str, start_date: str | None, end_date:
             start_date=start_date,
             end_date=end_date,
             progress_callback=progress,
+            backtest_run_id=run_id,
         )
         runtime_cache_clear("trades:")
         runtime_cache_clear("skipped:")
@@ -876,7 +973,7 @@ def chart_datetime(date_value: Any, hhmm: Any) -> datetime:
 
 
 def timeframe_floor(dt: datetime, timeframe: str) -> datetime:
-    minutes = {"1m": 1, "5m": 5, "15m": 15}[timeframe]
+    minutes = {"5m": 5}[timeframe]
     floored = dt.replace(second=0, microsecond=0)
     return floored.replace(minute=(floored.minute // minutes) * minutes)
 
@@ -1065,12 +1162,11 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
         start_date = (trading_date - timedelta(days=10)).isoformat()
         end_date = trading_date.isoformat()
         db = get_db()
-        candles_1m = db.load_candles("1m", symbol=LIVE_DB_SYMBOL, start_date=end_date, end_date=end_date)
         candles_5m = db.load_candles("5m", symbol=LIVE_DB_SYMBOL, start_date=start_date, end_date=end_date)
-        if candles_1m.empty or candles_5m.empty:
+        if candles_5m.empty:
             return
         level_set = LevelEngine().calculate(candles_5m, trading_date)
-        signals, skipped = SignalEngine().generate_for_candle(candles_5m, candles_1m, level_set, trading_date, candle_time)
+        signals, skipped = SignalEngine().generate_for_candle(candles_5m, level_set, trading_date, candle_time)
         paper = PaperTradeEngine()
         saved_trades = 0
         saved_skipped = 0
@@ -1264,7 +1360,7 @@ def record_live_market_price(price: float, tick_time: datetime, source: str) -> 
     updated: dict[str, dict[str, Any]] = {}
     completed: list[dict[str, Any]] = []
     with _live_candle_lock:
-        for timeframe in ("1m", "5m", "15m"):
+        for timeframe in ("5m",):
             bucket = timeframe_floor(tick_time, timeframe)
             live_time = chart_time(bucket)
             key = (timeframe, live_time)
@@ -1341,12 +1437,13 @@ def live_chart_update_payload(timeframe: str) -> dict[str, Any]:
     latest = latest_live_candle(timeframe)
     source = "FYERS socket"
     message = socket_status.get("message") or "FYERS socket status unavailable"
+    market_open = bool(nse_market_hours_status().get("is_open"))
     if socket_status.get("price") is not None and latest is None:
         tick_dt = datetime.now(IST).replace(tzinfo=None)
         record_live_market_price(float(socket_status["price"]), tick_dt, source="FYERS socket")
         update_live_open_trades(float(socket_status["price"]), tick_dt)
         latest = latest_live_candle(timeframe)
-    if latest is None:
+    if latest is None and market_open:
         price = cached_fyers_quote(FYERS_NIFTY_INDEX)
         source = "FYERS REST quote"
         message = "Live FYERS REST quote applied; waiting for first socket tick"
@@ -1491,6 +1588,7 @@ def append_live_quote_candle(candles: list[dict[str, Any]], timeframe: str) -> d
     }
     try:
         socket_status = live_socket_quote(FYERS_NIFTY_INDEX)
+        market_open = bool(nse_market_hours_status().get("is_open"))
         live["socket"] = socket_status
         if socket_status.get("price") is not None:
             price = float(socket_status["price"])
@@ -1502,11 +1600,12 @@ def append_live_quote_candle(candles: list[dict[str, Any]], timeframe: str) -> d
             socket_message = socket_status.get("message") or "socket tick unavailable"
             message = f"Live FYERS REST quote applied; {socket_message}"
         live_price = round(float(price), 2)
-        if source != "FYERS socket" or latest_live_candle(timeframe) is None:
+        if market_open and (source != "FYERS socket" or latest_live_candle(timeframe) is None):
             tick_dt = datetime.now(IST).replace(tzinfo=None)
             record_live_market_price(live_price, tick_dt, source=source)
             update_live_open_trades(live_price, tick_dt)
-        merge_live_candles(candles, timeframe)
+        if market_open:
+            merge_live_candles(candles, timeframe)
         live_candle = latest_live_candle(timeframe)
         if live_candle:
             live_price = round(float(live_candle["close"]), 2)
@@ -1673,6 +1772,44 @@ def levels_near_underlying(levels: list[dict[str, Any]], underlying: float | Non
     return out
 
 
+def zones_near_underlying(zones: list[dict[str, Any]], underlying: float | None, points: float = 500.0) -> list[dict[str, Any]]:
+    if underlying is None:
+        return zones
+    out: list[dict[str, Any]] = []
+    for zone in zones:
+        try:
+            low = float(zone["low"])
+            high = float(zone["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        distance = 0.0 if low <= float(underlying) <= high else min(abs(float(underlying) - low), abs(float(underlying) - high))
+        if distance <= points:
+            out.append(zone)
+    return out
+
+
+def smart_zone_chart_zones(candles_5m, current_price: float | None = None) -> list[dict[str, Any]]:
+    result = LevelEngine().calculate_smart_zones(candles_5m, current_price=current_price)
+    out: list[dict[str, Any]] = []
+    for zone in result.strongest_zones[:10]:
+        color = "#16a34a" if any(tag in zone.zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows")) else "#dc2626"
+        label = zone.zone_type.upper().replace("_", " ")
+        out.append(
+            {
+                "zone_id": zone.zone_id,
+                "name": label,
+                "zone_type": zone.zone_type,
+                "low": round(float(zone.low), 2),
+                "high": round(float(zone.high), 2),
+                "midpoint": round(float(zone.midpoint), 2),
+                "score": zone.score,
+                "status": zone.status,
+                "color": color,
+            }
+        )
+    return out
+
+
 def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str, Any]:
     cache_key = (timeframe, symbol, days)
     now = time.monotonic()
@@ -1683,6 +1820,7 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
             payload = {
                 **base,
                 "levels": list(base["levels"]),
+                "zones": list(base.get("zones") or []),
                 "counts": dict(base["counts"]),
                 "latest_ai": dict(base["latest_ai"]),
                 "price_range": dict(base["price_range"]) if base.get("price_range") else None,
@@ -1699,21 +1837,22 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
     trades = db.list_trades_between(start.isoformat(), end.isoformat(), symbol=symbol, limit=1000)
     markers = trade_markers(trades)
     levels = []
+    zones = []
     latest_ai: dict[str, Any] = {"date": None, "signals": 0, "skipped": 0, "message": "No candle data"}
 
     try:
         if chart_rows:
             latest_date = chart_rows[-1]["datetime"].date()
             ai_start = (latest_date - timedelta(days=10)).isoformat()
-            candles_1m = db.load_candles("1m", symbol=symbol, start_date=str(latest_date), end_date=str(latest_date))
             candles_5m = db.load_candles("5m", symbol=symbol, start_date=ai_start, end_date=str(latest_date))
-            if not candles_1m.empty and not candles_5m.empty:
+            if not candles_5m.empty:
                 level_set = LevelEngine().calculate(candles_5m, latest_date)
-                day_signals, day_skipped = SignalEngine().generate_for_day(candles_5m, candles_1m, level_set, latest_date)
+                day_signals, day_skipped = SignalEngine().generate_for_day(candles_5m, level_set, latest_date)
                 markers.extend(signal_markers(day_signals))
                 markers.extend(skipped_markers([item.to_dict() for item in day_skipped]))
                 latest_close = candle_close(candles[-1]) if candles else None
                 levels = level_payload(level_set, latest_close, price_range=price_range, relevance_points=1000.0)
+                zones = smart_zone_chart_zones(candles_5m, latest_close)
                 latest_ai = {
                     "date": str(latest_date),
                     "signals": len(day_signals),
@@ -1735,6 +1874,7 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
         "candles": candles,
         "markers": markers,
         "levels": levels,
+        "zones": zones,
         "price_range": price_range,
         "latest_ai": latest_ai,
         "counts": {
@@ -1742,6 +1882,7 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
             "markers": len(markers),
             "raw_markers": raw_marker_count,
             "levels": len(levels),
+            "zones": len(zones),
         },
         "cache": {"hit": False, "ttl_seconds": CHART_CACHE_TTL_SECONDS},
     }
@@ -1760,7 +1901,7 @@ def warm_admin_chart_cache(symbol: str = "NIFTY", days: int = 90) -> None:
     def worker() -> None:
         global _chart_warm_running
         try:
-            for timeframe in ("1m", "5m", "15m"):
+            for timeframe in ("5m",):
                 cached_admin_chart_base(timeframe, symbol, days)
         finally:
             with _chart_warm_lock:
@@ -2014,6 +2155,7 @@ def render_admin(
     }
     trades = cached_trades(100)
     skipped = cached_skipped(100)
+    backtest_status = current_backtest_payload()
     candle_counts = cached_candle_counts("NIFTY")
     preflight = runtime_cache_get("admin-preflight", 15, admin_preflight, copy_value=True)
     return templates.TemplateResponse(
@@ -2029,6 +2171,7 @@ def render_admin(
             "token_result": token_result,
             "trades": trades,
             "skipped": skipped,
+            "latest_backtest": backtest_status["latest"],
             "stats": trade_stats(trades),
             "candle_counts": candle_counts,
             "preflight": preflight,
@@ -2172,6 +2315,95 @@ def api_admin_preflight() -> dict[str, Any]:
     return runtime_cache_get("admin-preflight", 15, admin_preflight, copy_value=True)
 
 
+def replay_session_key(user: dict[str, Any]) -> str:
+    return str(user.get("username") or "admin")
+
+
+def get_replay_session_for_user(user: dict[str, Any]) -> ReplayBarSession:
+    key = replay_session_key(user)
+    with _replay_lock:
+        session = _replay_sessions.get(key)
+    if session is None:
+        raise HTTPException(status_code=404, detail="No replay loaded. Select dates and load replay first.")
+    return session
+
+
+def replay_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
+    logger.exception("Replay request failed")
+    return HTTPException(status_code=500, detail=f"Replay failed: {exc}")
+
+
+@app.post("/api/admin/replay/load")
+def api_admin_replay_load(payload: ReplayLoadPayload, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        symbol = payload.symbol.strip() or "NIFTY"
+        start_date = pd.to_datetime(payload.start_date).date().isoformat()
+        end_date = pd.to_datetime(payload.end_date).date().isoformat()
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="Start date must be before or equal to end date")
+        selected_candles = get_db().load_candles("5m", symbol=symbol, start_date=start_date, end_date=end_date)
+        if selected_candles.empty:
+            raise HTTPException(status_code=404, detail="No 5m candles found for selected replay dates")
+        context_days = max(0, min(int(payload.context_trading_days or 4), 20))
+        context_start_date = (pd.to_datetime(start_date).date() - timedelta(days=max(context_days * 4, 14))).isoformat()
+        candles = get_db().load_candles("5m", symbol=symbol, start_date=context_start_date, end_date=end_date)
+        if candles.empty:
+            candles = selected_candles
+        session = ReplayBarSession(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            candles_5m=candles,
+            warmup_candles=0,
+            context_trading_days=context_days,
+            cfg=config,
+        )
+        with _replay_lock:
+            _replay_sessions[replay_session_key(user)] = session
+            return session.payload()
+    except Exception as exc:
+        raise replay_error(exc) from exc
+
+
+@app.get("/api/admin/replay/status")
+def api_admin_replay_status(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _replay_lock:
+            return get_replay_session_for_user(user).payload()
+    except Exception as exc:
+        raise replay_error(exc) from exc
+
+
+@app.post("/api/admin/replay/next")
+def api_admin_replay_next(payload: ReplayStepPayload, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _replay_lock:
+            session = get_replay_session_for_user(user)
+            return session.next(count=max(1, min(int(payload.count or 1), 100)))
+    except Exception as exc:
+        raise replay_error(exc) from exc
+
+
+@app.post("/api/admin/replay/previous")
+def api_admin_replay_previous(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _replay_lock:
+            return get_replay_session_for_user(user).previous()
+    except Exception as exc:
+        raise replay_error(exc) from exc
+
+
+@app.post("/api/admin/replay/reset")
+def api_admin_replay_reset(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _replay_lock:
+            return get_replay_session_for_user(user).reset()
+    except Exception as exc:
+        raise replay_error(exc) from exc
+
+
 @app.get("/api/admin/live-trades/monitor", dependencies=[Depends(require_admin)])
 def api_admin_live_trade_monitor_status() -> dict[str, Any]:
     return live_trade_monitor_status()
@@ -2187,13 +2419,13 @@ def api_admin_start_live_trade_monitor(
 
 @app.get("/api/admin/live-chart", dependencies=[Depends(require_admin)])
 def api_admin_live_chart(
-    timeframe: str = "1m",
+    timeframe: str = "5m",
     symbol: str = "NIFTY",
     days: int = 90,
     live: bool = True,
 ) -> dict[str, Any]:
-    if timeframe not in {"1m", "5m", "15m"}:
-        raise HTTPException(status_code=400, detail="timeframe must be one of: 1m, 5m, 15m")
+    if timeframe != "5m":
+        raise HTTPException(status_code=400, detail="timeframe must be 5m")
     days = max(1, min(int(days), 120))
     payload = cached_admin_chart_base(timeframe, symbol, days)
     candles = payload["candles"]
@@ -2209,15 +2441,46 @@ def api_admin_live_chart(
             level for level in payload["levels"]
             if price_range and price_range["low"] <= float(level["price"]) <= price_range["high"]
         ]
+        payload["zones"] = [
+            zone for zone in payload.get("zones", [])
+            if price_range and float(zone["high"]) >= price_range["low"] and float(zone["low"]) <= price_range["high"]
+        ]
     underlying = live_status.get("price") if live_status.get("enabled") else (candle_close(candles[-1]) if candles else None)
     payload["levels"] = levels_near_underlying(payload["levels"], underlying, 200.0)
+    payload["zones"] = zones_near_underlying(payload.get("zones", []), underlying, 500.0)
     payload["counts"]["levels"] = len(payload["levels"])
+    payload["counts"]["zones"] = len(payload["zones"])
     payload["live"] = live_status
     return payload
 
 
+@app.get("/api/admin/smart-levels", dependencies=[Depends(require_admin)])
+def api_admin_smart_levels(
+    symbol: str = "NIFTY",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    current_price: float | None = None,
+    format: str | None = None,
+):
+    export_format = str(format or "").lower() or None
+    if export_format not in {None, "json", "csv"}:
+        raise HTTPException(status_code=400, detail="format must be json or csv")
+    payload = get_service().smart_levels_from_database(
+        symbol=symbol.strip() or "NIFTY",
+        start_date=start_date,
+        end_date=end_date,
+        current_price=current_price,
+        export_format=export_format,
+    )
+    if export_format == "csv":
+        return Response(content=str(payload), media_type="text/csv")
+    if export_format == "json":
+        return Response(content=str(payload), media_type="application/json")
+    return payload
+
+
 @app.get("/api/admin/live-chart/update", dependencies=[Depends(require_admin)])
-def api_admin_live_chart_update(timeframe: str = "1m") -> dict[str, Any]:
-    if timeframe not in {"1m", "5m", "15m"}:
-        raise HTTPException(status_code=400, detail="timeframe must be one of: 1m, 5m, 15m")
+def api_admin_live_chart_update(timeframe: str = "5m") -> dict[str, Any]:
+    if timeframe != "5m":
+        raise HTTPException(status_code=400, detail="timeframe must be 5m")
     return live_chart_update_payload(timeframe)

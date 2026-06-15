@@ -17,6 +17,7 @@ from app.engines.liquidity_context import LiquidityContextEngine
 from app.engines.order_block import OrderBlockEngine
 from app.engines.premium_discount import PremiumDiscountEngine
 from app.engines.risk import RiskEngine
+from app.engines.smart_trades import SmartTradeEngine
 from app.engines.structure import StructureEngine
 from app.options_pricing import select_option_contract
 
@@ -33,22 +34,31 @@ class SignalEngine:
         self.order_blocks = OrderBlockEngine()
         self.premium_discount = PremiumDiscountEngine(cfg)
         self.risk = RiskEngine(cfg)
+        self.smart_trades = SmartTradeEngine(cfg)
         self.option_snapshot: dict[str, Any] | None = None
         self.failed_levels: dict[str, int] = defaultdict(int)
 
     def generate_for_day(
         self,
         candles_5m: pd.DataFrame,
-        candles_1m: pd.DataFrame,
         levels: LevelSet,
         trading_date: date,
     ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
         rows = candles_5m[candles_5m["date"] == trading_date].reset_index()
         signals: list[SignalCandidate] = []
         skipped: list[SkippedSignal] = []
+        if rows.empty:
+            return signals, skipped
+        htf_contexts = {} if not self.cfg.legacy_signal_setups_enabled else self._htf_contexts_for_rows(candles_5m, rows)
+        self.smart_trades.option_snapshot = self.option_snapshot
+        smart_signals, smart_skipped = self.smart_trades.generate_for_day(candles_5m, levels, trading_date, htf_contexts)
+        signals.extend(smart_signals)
+        skipped.extend(smart_skipped)
+        if not self.cfg.legacy_signal_setups_enabled:
+            return signals, skipped
         if levels.orh is None or levels.orl is None:
-            return signals, [SkippedSignal(str(trading_date), "09:30", "CE", "OPENING_RANGE", "Opening range unavailable", {})]
-        htf_contexts = self._htf_contexts_for_rows(candles_5m, rows)
+            skipped.append(SkippedSignal(str(trading_date), "09:30", "CE", "OPENING_RANGE", "Opening range unavailable", {}))
+            return signals, skipped
 
         for i, row in rows.iterrows():
             if row["time"] < self.cfg.opening_range_end:
@@ -60,21 +70,23 @@ class SignalEngine:
                 skipped.append(self._skip(row, "CE", "RANGE_CONTEXT", "Price is inside ORH and ORL after 09:30", {"orh": as_of_levels.orh, "orl": as_of_levels.orl}))
                 continue
 
-            signals.extend(self._opening_range_candidates(rows, i, row, candles_1m, as_of_levels, htf_contexts, skipped))
-            signals.extend(self._sweep_candidates(rows, i, row, candles_1m, as_of_levels, htf_contexts, skipped))
-            signals.extend(self._target_reversal_candidates(rows, i, row, candles_1m, as_of_levels, htf_contexts, skipped))
-            signals.extend(self._ob_retest_candidates(rows, i, row, candles_1m, as_of_levels, htf_contexts, skipped))
+            signals.extend(self._opening_range_candidates(rows, i, row, as_of_levels, htf_contexts, skipped))
+            signals.extend(self._sweep_candidates(rows, i, row, as_of_levels, htf_contexts, skipped))
+            signals.extend(self._target_reversal_candidates(rows, i, row, as_of_levels, htf_contexts, skipped))
+            signals.extend(self._ob_retest_candidates(rows, i, row, as_of_levels, htf_contexts, skipped))
         return signals, skipped
 
     def generate_for_candle(
         self,
         candles_5m: pd.DataFrame,
-        candles_1m: pd.DataFrame,
         levels: LevelSet,
         trading_date: date,
         candle_time,
     ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
-        signals, skipped = self.generate_for_day(candles_5m, candles_1m, levels, trading_date)
+        if not self.cfg.legacy_signal_setups_enabled:
+            self.smart_trades.option_snapshot = self.option_snapshot
+            return self.smart_trades.generate_for_candle(candles_5m, levels, trading_date, candle_time)
+        signals, skipped = self.generate_for_day(candles_5m, levels, trading_date)
         source_time = pd.to_datetime(candle_time).strftime("%H:%M")
         return (
             [signal for signal in signals if signal.features.get("time") == source_time],
@@ -97,12 +109,17 @@ class SignalEngine:
         )
 
     def _htf_contexts_for_rows(self, candles_5m: pd.DataFrame, rows: pd.DataFrame) -> dict[int, dict[str, Any]]:
+        htf_frame = candles_5m
+        if "datetime" in htf_frame.columns and not isinstance(htf_frame.index, pd.DatetimeIndex):
+            htf_frame = htf_frame.copy()
+            htf_frame["datetime"] = pd.to_datetime(htf_frame["datetime"])
+            htf_frame = htf_frame.set_index("datetime")
         return {
-            int(i): self.htf_bias.context(candles_5m, pd.to_datetime(row["datetime"]))
+            int(i): self.htf_bias.context(htf_frame, pd.to_datetime(row["datetime"]))
             for i, row in rows.iterrows()
         }
 
-    def _opening_range_candidates(self, rows, i: int, row: pd.Series, candles_1m: pd.DataFrame, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
+    def _opening_range_candidates(self, rows, i: int, row: pd.Series, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
         out: list[SignalCandidate] = []
         if row["high"] > levels.orh and row["close"] <= levels.orh:
             skipped.append(self._skip(row, "CE", "ORH_BREAKOUT_CONTINUATION", "Breakout is wick-only", {"orh": levels.orh}))
@@ -110,14 +127,14 @@ class SignalEngine:
             skipped.append(self._skip(row, "PE", "ORL_BREAKDOWN_CONTINUATION", "Breakdown is wick-only", {"orl": levels.orl}))
 
         if row["close"] > levels.orh:
-            signal = self._build_signal("CE", "ORH_BREAKOUT_CONTINUATION", rows, i, row, candles_1m, levels, [float(row["low"])], {"break_level": levels.orh, "break_side": "buy_side", "htf_bias": htf_contexts.get(int(i), {})})
+            signal = self._build_signal("CE", "ORH_BREAKOUT_CONTINUATION", rows, i, row, levels, [float(row["low"])], {"break_level": levels.orh, "break_side": "buy_side", "htf_bias": htf_contexts.get(int(i), {})})
             self._append_or_skip(signal, skipped, row, "CE", "ORH_BREAKOUT_CONTINUATION", out)
         if row["close"] < levels.orl:
-            signal = self._build_signal("PE", "ORL_BREAKDOWN_CONTINUATION", rows, i, row, candles_1m, levels, [float(row["high"])], {"break_level": levels.orl, "break_side": "sell_side", "htf_bias": htf_contexts.get(int(i), {})})
+            signal = self._build_signal("PE", "ORL_BREAKDOWN_CONTINUATION", rows, i, row, levels, [float(row["high"])], {"break_level": levels.orl, "break_side": "sell_side", "htf_bias": htf_contexts.get(int(i), {})})
             self._append_or_skip(signal, skipped, row, "PE", "ORL_BREAKDOWN_CONTINUATION", out)
         return out
 
-    def _sweep_candidates(self, rows, i: int, row: pd.Series, candles_1m: pd.DataFrame, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
+    def _sweep_candidates(self, rows, i: int, row: pd.Series, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
         out: list[SignalCandidate] = []
         for sweep in self.liquidity.sweeps(row, levels):
             direction = sweep["direction"]
@@ -143,7 +160,6 @@ class SignalEngine:
                 rows,
                 trigger_index,
                 trigger_row,
-                candles_1m,
                 levels,
                 invalidation,
                 {
@@ -170,7 +186,7 @@ class SignalEngine:
                 return int(j)
         return None
 
-    def _target_reversal_candidates(self, rows, i: int, row: pd.Series, candles_1m: pd.DataFrame, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
+    def _target_reversal_candidates(self, rows, i: int, row: pd.Series, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
         out: list[SignalCandidate] = []
         if row["time"] < self.cfg.late_reversal_start:
             return out
@@ -189,7 +205,6 @@ class SignalEngine:
                 rows,
                 trigger_index,
                 trigger_row,
-                candles_1m,
                 levels,
                 invalidation,
                 {
@@ -293,7 +308,7 @@ class SignalEngine:
             out.append({"level": "ROUND_NUMBER", "price": price, "direction": "CE"})
         return out
 
-    def _ob_retest_candidates(self, rows, i: int, row: pd.Series, candles_1m: pd.DataFrame, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
+    def _ob_retest_candidates(self, rows, i: int, row: pd.Series, levels: LevelSet, htf_contexts: dict[int, dict[str, Any]], skipped: list[SkippedSignal]) -> list[SignalCandidate]:
         out: list[SignalCandidate] = []
         bos = self.structure.bos(rows.set_index("datetime"), i)
         if not bos["is_bos"]:
@@ -311,7 +326,7 @@ class SignalEngine:
             return out
         setup = "BULLISH_OB_RETEST_CONTINUATION" if direction == "CE" else "BEARISH_OB_RETEST_CONTINUATION"
         invalidation = [float(ob["low"] if direction == "CE" else ob["high"]), float(next_row["low"] if direction == "CE" else next_row["high"])]
-        signal = self._build_signal(direction, setup, rows, next_index, next_row, candles_1m, levels, invalidation, {"order_block": ob, "htf_bias": htf_contexts.get(int(next_index), {})})
+        signal = self._build_signal(direction, setup, rows, next_index, next_row, levels, invalidation, {"order_block": ob, "htf_bias": htf_contexts.get(int(next_index), {})})
         self._append_or_skip(signal, skipped, next_row, direction, setup, out)
         return out
 
@@ -322,7 +337,6 @@ class SignalEngine:
         rows: pd.DataFrame,
         i: int,
         row: pd.Series,
-        candles_1m: pd.DataFrame,
         levels: LevelSet,
         invalidation_points: list[float],
         extra: dict[str, Any],
@@ -331,8 +345,6 @@ class SignalEngine:
         disp = self.displacement.analyze(candles, i)
         expected = "bullish" if direction == "CE" else "bearish"
         structure = self.structure.structure_shift(candles, i)
-        one_min_until = self._last_one_min_inside_candle(row)
-        one_min = self.structure.one_min_confirmation(candles_1m, one_min_until, direction)
         fvg_context = self.fvg.context(candles, i, direction)
         risk_plan, reason = self.risk.build_plan(row, levels, direction, invalidation_points)
         if reason:
@@ -351,14 +363,14 @@ class SignalEngine:
         has_directional_structure = structure.get("direction") == expected
         has_directional_body = row["close"] > row["open"] if direction == "CE" else row["close"] < row["open"]
         has_five_min_trigger = extra.get("trigger_timeframe") == "5m" and has_directional_body
-        if not (has_directional_displacement or has_directional_structure or one_min or has_five_min_trigger):
-            return None, "No confirmation: needs displacement, BOS/CHoCH/MSS, 1m structure, or 5m trigger candle", {"displacement": disp, "bos": structure, "structure_shift": structure, "one_min_confirmation": one_min, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
-        if ("ORH_BREAKOUT" in setup or "ORL_BREAKDOWN" in setup) and not (has_directional_body and (has_directional_displacement or has_directional_structure or one_min)):
-            return None, "Breakout lacks candle/structure/1m confirmation", {"displacement": disp, "bos": structure, "structure_shift": structure, "one_min_confirmation": one_min, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
+        if not (has_directional_displacement or has_directional_structure or has_five_min_trigger or has_directional_body):
+            return None, "No confirmation: needs 5m displacement, BOS/CHoCH/MSS, or directional candle", {"displacement": disp, "bos": structure, "structure_shift": structure, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
+        if ("ORH_BREAKOUT" in setup or "ORL_BREAKDOWN" in setup) and not (has_directional_body and (has_directional_displacement or has_directional_structure)):
+            return None, "Breakout lacks 5m candle/structure confirmation", {"displacement": disp, "bos": structure, "structure_shift": structure, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
         time_quality = self._time_quality(row["time"])
-        score = self._score_setup(setup, direction, row, disp, structure, one_min, risk_plan, time_quality, fvg_context, premium_discount_context, liquidity_context)
+        score = self._score_setup(setup, direction, row, disp, structure, has_five_min_trigger, risk_plan, time_quality, fvg_context, premium_discount_context, liquidity_context)
         if score < self.cfg.min_setup_score:
-            return None, f"Setup score below {self.cfg.min_setup_score}", {"score": score, "displacement": disp, "bos": structure, "structure_shift": structure, "one_min_confirmation": one_min, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
+            return None, f"Setup score below {self.cfg.min_setup_score}", {"score": score, "displacement": disp, "bos": structure, "structure_shift": structure, "fair_value_gap": fvg_context, "premium_discount": premium_discount_context, "liquidity_context": liquidity_context, **extra}
         features = self._features(
             row,
             levels,
@@ -368,8 +380,7 @@ class SignalEngine:
             {
                 **extra,
                 "structure_shift": structure,
-                "one_min_confirmation": one_min,
-                "one_min_confirmation_until": one_min_until.strftime("%H:%M"),
+                "five_min_confirmation": has_five_min_trigger or has_directional_body,
                 "fair_value_gap": fvg_context,
                 "premium_discount": premium_discount_context,
                 "liquidity_context": liquidity_context,
@@ -452,10 +463,6 @@ class SignalEngine:
             return None
         return round(float(levels.orh - levels.orl), 2)
 
-    @staticmethod
-    def _last_one_min_inside_candle(row: pd.Series) -> pd.Timestamp:
-        return pd.to_datetime(row["datetime"]) + pd.Timedelta(minutes=4)
-
     def _skip(self, row: pd.Series, direction: str, setup: str, reason: str, context: dict[str, Any]) -> SkippedSignal:
         return SkippedSignal(str(row["date"]), row["time"], direction, setup, reason, context)
 
@@ -473,7 +480,7 @@ class SignalEngine:
         row: pd.Series,
         disp: dict[str, Any],
         structure: dict[str, Any],
-        one_min: bool,
+        five_min_confirmation: bool,
         risk_plan: dict[str, Any],
         time_quality: int,
         fvg_context: dict[str, Any] | None = None,
@@ -521,7 +528,7 @@ class SignalEngine:
         elif structure.get("is_structure_break"):
             score -= 8
 
-        if one_min:
+        if five_min_confirmation:
             score += 10
 
         if fvg_context and fvg_context.get("present"):
@@ -597,7 +604,7 @@ class SignalEngine:
             "is_CHOCH": structure.get("is_choch"),
             "is_MSS": structure.get("is_mss"),
             "structure_shift_strength": structure.get("strength"),
-            "one_min_confirmation": extra.get("one_min_confirmation"),
+            "five_min_confirmation": extra.get("five_min_confirmation"),
             "HTF_bias": extra.get("htf_bias", {}).get("bias"),
             "HTF_bias_reason": extra.get("htf_bias", {}).get("reason"),
             "HTF_15m_bias": extra.get("htf_bias", {}).get("15m", {}).get("bias"),

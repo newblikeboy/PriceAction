@@ -9,7 +9,10 @@
   const tfButtons = Array.from(document.querySelectorAll("[data-chart-timeframe]"));
   const crosshairEl = document.getElementById("chart-crosshair-readout");
   const liveMessageEl = document.getElementById("chart-live-message");
-  let timeframe = "1m";
+  const zoneLayer = document.createElement("div");
+  zoneLayer.className = "chart-zone-layer";
+  chartEl.appendChild(zoneLayer);
+  let timeframe = "5m";
   let priceLines = [];
   let livePollTimer = null;
   let fullRefreshTimer = null;
@@ -23,6 +26,8 @@
   let lastPayload = null;
   let lastCandles = [];
   let latestUnderlyingValue = null;
+  let latestZones = [];
+  let zoneRedrawTimer = null;
 
   function cacheKey() {
     return `priceAction.chart.${timeframe}.90`;
@@ -94,8 +99,12 @@
       SWING_LOW: "SL",
       DAY_HIGH: "DH",
       DAY_LOW: "DL",
+      DEMAND_LOW: "D L",
+      DEMAND_HIGH: "D H",
+      SUPPLY_LOW: "S L",
+      SUPPLY_HIGH: "S H",
     };
-    return mapping[name] || name;
+    return mapping[name] || name.replace(/\s+/g, " ").slice(0, 16);
   }
 
   function levelDistance(level) {
@@ -142,12 +151,83 @@
         candleSeries.createPriceLine({
           price: price,
           color: level.color || "#64748b",
-          lineWidth: 1,
+          lineWidth: level.zone_id ? 2 : 1,
           lineStyle: LightweightCharts.LineStyle.Dashed,
           axisLabelVisible: true,
           title: shortLevelName(String(level.name || "")),
         })
       );
+    });
+  }
+
+  function shortZoneName(name) {
+    return String(name || "ZONE").replace(/\s+/g, " ").slice(0, 24);
+  }
+
+  function chartPaneOffsetTop() {
+    const chartRect = chartEl.getBoundingClientRect();
+    const canvases = Array.from(chartEl.querySelectorAll("canvas"));
+    if (!canvases.length) {
+      return 0;
+    }
+    const paneCanvas = canvases
+      .map(function (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        return { rect: rect, area: rect.width * rect.height };
+      })
+      .filter(function (item) {
+        return item.rect.width > 100 && item.rect.height > 100;
+      })
+      .sort(function (a, b) {
+        return b.area - a.area;
+      })[0];
+    return paneCanvas ? paneCanvas.rect.top - chartRect.top : 0;
+  }
+
+  function scheduleZoneRedraw() {
+    window.requestAnimationFrame(function () {
+      applyZones(latestZones);
+    });
+    window.clearTimeout(zoneRedrawTimer);
+    zoneRedrawTimer = window.setTimeout(function () {
+      applyZones(latestZones);
+    }, 80);
+    window.setTimeout(function () {
+      applyZones(latestZones);
+    }, 180);
+  }
+
+  function applyZones(zones) {
+    latestZones = zones || [];
+    zoneLayer.innerHTML = "";
+    const paneOffsetTop = chartPaneOffsetTop();
+    latestZones.forEach(function (zone) {
+      const low = Number(zone.low);
+      const high = Number(zone.high);
+      if (!Number.isFinite(low) || !Number.isFinite(high) || high <= low) {
+        return;
+      }
+      const topCoordinate = candleSeries.priceToCoordinate(high);
+      const bottomCoordinate = candleSeries.priceToCoordinate(low);
+      if (!Number.isFinite(topCoordinate) || !Number.isFinite(bottomCoordinate)) {
+        return;
+      }
+      const top = paneOffsetTop + Math.min(topCoordinate, bottomCoordinate);
+      const height = Math.max(3, Math.abs(bottomCoordinate - topCoordinate));
+      const band = document.createElement("div");
+      band.className = "chart-zone-band";
+      band.style.top = `${top}px`;
+      band.style.height = `${height}px`;
+      band.style.borderColor = zone.color || "#64748b";
+      band.style.backgroundColor = zone.color || "#64748b";
+      band.style.setProperty("--zone-color", zone.color || "#64748b");
+      band.title = `${shortZoneName(zone.name)} ${low.toFixed(2)} - ${high.toFixed(2)} Score ${zone.score || "--"}`;
+
+      const label = document.createElement("span");
+      label.className = "chart-zone-label";
+      label.textContent = `${shortZoneName(zone.name)} ${low.toFixed(0)}-${high.toFixed(0)}`;
+      band.appendChild(label);
+      zoneLayer.appendChild(band);
     });
   }
 
@@ -167,23 +247,11 @@
   }
 
   function visibleBarsForTimeframe() {
-    if (timeframe === "1m") {
-      return 180;
-    }
-    if (timeframe === "5m") {
-      return 120;
-    }
-    return 96;
+    return 120;
   }
 
   function livePricePadding() {
-    if (timeframe === "1m") {
-      return 70;
-    }
-    if (timeframe === "5m") {
-      return 110;
-    }
-    return 160;
+    return 110;
   }
 
   function currentUnderlying(payload, candles) {
@@ -270,6 +338,7 @@
     lastPayload = payload;
     lastCandles = candles;
     latestUnderlyingValue = currentUnderlying(payload, candles);
+    latestZones = payload.zones || [];
     candleSeries.setData(candles);
     candleSeries.setMarkers(isMobileChart() ? [] : (payload.markers || []));
     if (shouldFocusUnderlying && !userLockedView) {
@@ -279,6 +348,7 @@
       hasFitInitialContent = true;
     }
     applyLevels(payload.levels || []);
+    scheduleZoneRedraw();
     const live = payload.live || {};
     setText(liveMessageEl, live.message || "Live status unavailable");
     hasLoaded = true;
@@ -349,6 +419,7 @@
         if (payload.candle) {
           mergeLiveCandle(payload.candle);
           latestUnderlyingValue = Number(payload.candle.close);
+          scheduleZoneRedraw();
         }
         if (lastPayload) {
           lastPayload.live = payload.live || lastPayload.live;
@@ -373,6 +444,8 @@
     tfButtons.forEach(function (button) {
       button.classList.toggle("is-active", button.dataset.chartTimeframe === timeframe);
     });
+    latestZones = [];
+    zoneLayer.innerHTML = "";
     loadChart();
   }
 
@@ -382,6 +455,7 @@
     const stageHeight = chartEl.parentElement ? chartEl.parentElement.clientHeight : 0;
     const height = cssHeight || stageHeight || chartEl.clientHeight || 520;
     chart.applyOptions({ width: width, height: height });
+    scheduleZoneRedraw();
   }
 
   function startPolling() {
@@ -410,7 +484,7 @@
 
   tfButtons.forEach(function (button) {
     button.addEventListener("click", function () {
-      setTimeframe(button.dataset.chartTimeframe || "1m");
+      setTimeframe(button.dataset.chartTimeframe || "5m");
     });
   });
 
@@ -446,6 +520,17 @@
     }
     userLockedView = true;
     shouldFocusUnderlying = false;
+    scheduleZoneRedraw();
+  });
+
+  chart.timeScale().subscribeVisibleTimeRangeChange(function () {
+    if (hasLoaded) {
+      scheduleZoneRedraw();
+    }
+  });
+
+  ["wheel", "mouseup", "mouseleave", "touchend", "pointerup"].forEach(function (eventName) {
+    chartEl.addEventListener(eventName, scheduleZoneRedraw, { passive: true });
   });
 
   window.addEventListener("resize", function () {

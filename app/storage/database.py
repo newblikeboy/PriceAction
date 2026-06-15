@@ -149,7 +149,7 @@ class Database:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
-                for timeframe in ("1m", "5m", "15m"):
+                for timeframe in ("5m",):
                     table = self.candle_table(timeframe)
                     cursor.execute(
                         f"""
@@ -176,6 +176,7 @@ class Database:
         cursor.execute("SHOW COLUMNS FROM paper_trades")
         existing = {str(row.get("Field") or "") for row in cursor.fetchall()}
         columns = {
+            "backtest_run_id": "BIGINT UNSIGNED",
             "option_symbol": "VARCHAR(128)",
             "option_side": "VARCHAR(2)",
             "option_strike": "DECIMAL(12, 2)",
@@ -195,12 +196,10 @@ class Database:
     @staticmethod
     def candle_table(timeframe: str) -> str:
         mapping = {
-            "1m": "nifty_index_candles_1m",
             "5m": "nifty_index_candles_5m",
-            "15m": "nifty_index_candles_15m",
         }
         if timeframe not in mapping:
-            raise ValueError("timeframe must be one of: 1m, 5m, 15m")
+            raise ValueError("timeframe must be 5m")
         return mapping[timeframe]
 
     def create_user(self, username: str, password: str, role: str = "user") -> None:
@@ -229,7 +228,7 @@ class Database:
                 cursor.execute(
                     """
                     INSERT INTO paper_trades (
-                        date, symbol, direction, setup_type, entry_time, entry_index_price,
+                        backtest_run_id, date, symbol, direction, setup_type, entry_time, entry_index_price,
                         sl_index_price, target_index_price, risk_points, reward_points,
                         risk_reward, setup_score, status, exit_time, exit_index_price,
                         exit_reason, result, r_multiple, max_favorable_excursion,
@@ -237,9 +236,10 @@ class Database:
                         option_entry_ltp, option_mark_ltp, option_exit_ltp, option_points,
                         pnl_source, underlying_entry_price, underlying_exit_price,
                         underlying_points, notes_json, features_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
+                        trade.get("backtest_run_id"),
                         trade["date"],
                         trade["symbol"],
                         trade["direction"],
@@ -479,7 +479,12 @@ class Database:
             return None
         return self.insert_skipped(skipped)
 
-    def insert_backtest_logs(self, trades: list[dict[str, Any]], skipped_signals: list[dict[str, Any]]) -> None:
+    def insert_backtest_logs(
+        self,
+        trades: list[dict[str, Any]],
+        skipped_signals: list[dict[str, Any]],
+        backtest_run_id: int | None = None,
+    ) -> None:
         with self.connect() as db:
             with db.cursor() as cursor:
                 if trades:
@@ -487,14 +492,18 @@ class Database:
                         cursor.execute(
                             """
                             INSERT INTO paper_trades (
-                                date, symbol, direction, setup_type, entry_time, entry_index_price,
+                                backtest_run_id, date, symbol, direction, setup_type, entry_time, entry_index_price,
                                 sl_index_price, target_index_price, risk_points, reward_points,
                                 risk_reward, setup_score, status, exit_time, exit_index_price,
                                 exit_reason, result, r_multiple, max_favorable_excursion,
-                                max_adverse_excursion, notes_json, features_json
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                max_adverse_excursion, option_symbol, option_side, option_strike,
+                                option_entry_ltp, option_mark_ltp, option_exit_ltp, option_points,
+                                pnl_source, underlying_entry_price, underlying_exit_price,
+                                underlying_points, notes_json, features_json
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (
+                                backtest_run_id,
                                 trade["date"],
                                 trade["symbol"],
                                 trade["direction"],
@@ -515,6 +524,17 @@ class Database:
                                 trade["r_multiple"],
                                 trade["max_favorable_excursion"],
                                 trade["max_adverse_excursion"],
+                                trade.get("option_symbol"),
+                                trade.get("option_side"),
+                                trade.get("option_strike"),
+                                trade.get("option_entry_ltp"),
+                                trade.get("option_mark_ltp"),
+                                trade.get("option_exit_ltp"),
+                                trade.get("option_points"),
+                                trade.get("pnl_source"),
+                                trade.get("underlying_entry_price") or trade.get("entry_index_price"),
+                                trade.get("underlying_exit_price"),
+                                trade.get("underlying_points"),
                                 json.dumps(trade["notes"]),
                                 json.dumps(trade["features"], default=str),
                             ),
@@ -617,6 +637,21 @@ class Database:
             row["summary"] = summary or {}
         row.pop("summary_json", None)
         return row
+
+    def list_backtest_trades(self, backtest_run_id: int, limit: int = 1000) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM paper_trades
+                    WHERE backtest_run_id = %s
+                    ORDER BY date ASC, entry_time ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (int(backtest_run_id), int(limit)),
+                )
+                return list(cursor.fetchall())
 
     def list_trades(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -804,7 +839,7 @@ class Database:
         out: dict[str, int] = {}
         with self.connect() as db:
             with db.cursor() as cursor:
-                for timeframe in ("1m", "5m", "15m"):
+                for timeframe in ("5m",):
                     table = self.candle_table(timeframe)
                     cursor.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE symbol = %s", (symbol,))
                     row = cursor.fetchone() or {}

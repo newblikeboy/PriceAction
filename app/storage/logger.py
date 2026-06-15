@@ -14,8 +14,9 @@ class TradeLogger:
     def log_skipped_signal(self, skipped: SkippedSignal) -> int:
         return self.database.insert_skipped(skipped.to_dict())
 
-    def log_backtest(self, trades: list[PaperTrade], skipped: list[SkippedSignal]) -> None:
+    def log_backtest(self, trades: list[PaperTrade], skipped: list[SkippedSignal], backtest_run_id: int | None = None) -> None:
         self.database.insert_backtest_logs(
             [trade.to_dict() for trade in trades],
             [signal.to_dict() for signal in skipped],
+            backtest_run_id=backtest_run_id,
         )
