@@ -19,6 +19,8 @@ SUPPORT_TYPES = {
     "breakout_base",
     "gap_up",
     "equal_lows_liquidity",
+    "order_block_bullish",
+    "bullish_breaker",
 }
 RESISTANCE_TYPES = {
     "swing_high",
@@ -26,12 +28,16 @@ RESISTANCE_TYPES = {
     "breakdown_base",
     "gap_down",
     "equal_highs_liquidity",
+    "order_block_bearish",
+    "bearish_breaker",
 }
 DECISION_TYPES = {
     "demand",
     "supply",
     "breakout_base",
     "breakdown_base",
+    "order_block_bullish",
+    "order_block_bearish",
 }
 LIQUIDITY_CONTEXT_TYPES = {
     "equal_lows_liquidity",
@@ -248,11 +254,13 @@ class LevelEngine:
     def _candidate_zones(self, rows: pd.DataFrame) -> list[dict[str, Any]]:
         zones: list[dict[str, Any]] = []
         zones.extend(self._decision_zones(rows))
+        zones.extend(self._order_block_zones(rows))
         zones.extend(self._sweep_reclaim_zones(rows))
         zones.extend(self._swing_zones(rows))
         zones.extend(self._base_zones(rows))
         zones.extend(self._daily_gap_zones(rows))
         zones.extend(self._liquidity_zones(rows))
+        zones.extend(self._breaker_block_zones(rows))
         return zones
 
     def _swing_zones(self, rows: pd.DataFrame) -> list[dict[str, Any]]:
@@ -434,6 +442,166 @@ class LevelEngine:
             )
         return out
 
+    def _order_block_zones(self, rows: pd.DataFrame) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for impulse_index in range(2, len(rows)):
+            impulse = rows.iloc[impulse_index]
+            body = abs(float(impulse["close"]) - float(impulse["open"]))
+            candle_range = max(float(impulse["high"]) - float(impulse["low"]), 0.01)
+            if body / candle_range < self.cfg.smart_quality_min_body_pct:
+                continue
+            atr = max(float(impulse.get("atr") or self._latest_atr(rows)), 1.0)
+            if body < atr * 0.6:
+                continue
+            is_bullish_break = (
+                self._breaks_structure(rows, impulse_index, "bullish")
+                and float(impulse["close"]) > float(impulse["open"])
+            )
+            is_bearish_break = (
+                self._breaks_structure(rows, impulse_index, "bearish")
+                and float(impulse["close"]) < float(impulse["open"])
+            )
+            if is_bullish_break:
+                for i in range(impulse_index - 1, max(-1, impulse_index - 6), -1):
+                    candle = rows.iloc[i]
+                    if float(candle["close"]) < float(candle["open"]):
+                        body_low = round(float(candle["close"]), 2)
+                        body_high = round(float(candle["open"]), 2)
+                        if body_high - body_low < self.cfg.smart_min_zone_width_points:
+                            midpoint = (body_low + body_high) / 2
+                            half = self._zone_width(rows, i) / 2
+                            body_low, body_high = round(midpoint - half, 2), round(midpoint + half, 2)
+                        out.append(self._raw_zone(
+                            "order_block_bullish", body_low, body_high, impulse_index, "bullish",
+                            ["ICT bullish OB: last bearish body before bullish structure break"],
+                        ))
+                        break
+            if is_bearish_break:
+                for i in range(impulse_index - 1, max(-1, impulse_index - 6), -1):
+                    candle = rows.iloc[i]
+                    if float(candle["close"]) > float(candle["open"]):
+                        body_low = round(float(candle["open"]), 2)
+                        body_high = round(float(candle["close"]), 2)
+                        if body_high - body_low < self.cfg.smart_min_zone_width_points:
+                            midpoint = (body_low + body_high) / 2
+                            half = self._zone_width(rows, i) / 2
+                            body_low, body_high = round(midpoint - half, 2), round(midpoint + half, 2)
+                        out.append(self._raw_zone(
+                            "order_block_bearish", body_low, body_high, impulse_index, "bearish",
+                            ["ICT bearish OB: last bullish body before bearish structure break"],
+                        ))
+                        break
+        return out
+
+    def _breaker_block_zones(self, rows: pd.DataFrame) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        swings = self.detect_swings(rows)
+        for swing in swings["highs"]:
+            swing_index = int(swing["index"])
+            swing_price = float(swing["price"])
+            confirm_index = min(swing_index + self.cfg.swing_right, len(rows) - 1)
+            after = rows.iloc[confirm_index + 1 :]
+            if after.empty:
+                continue
+            breakouts = after[after["close"] > swing_price]
+            if breakouts.empty:
+                continue
+            break_index = int(breakouts.index[0])
+            atr = max(float(rows.iloc[break_index].get("atr") or self._latest_atr(rows)), 1.0)
+            if float(rows.iloc[break_index]["close"]) - swing_price < atr * 0.1:
+                continue
+            swing_row = rows.iloc[swing_index]
+            zone_low = round(min(float(swing_row["open"]), float(swing_row["close"])), 2)
+            zone_high = round(max(float(swing_row["open"]), float(swing_row["close"])), 2)
+            if zone_high - zone_low < self.cfg.smart_min_zone_width_points:
+                half = self._zone_width(rows, swing_index) / 2
+                midpoint = (zone_low + zone_high) / 2
+                zone_low, zone_high = round(midpoint - half, 2), round(midpoint + half, 2)
+            out.append(self._raw_zone(
+                "bullish_breaker", zone_low, zone_high, break_index, "bullish",
+                [f"bullish breaker: former swing high at {round(swing_price, 2)} broken, now support"],
+            ))
+        for swing in swings["lows"]:
+            swing_index = int(swing["index"])
+            swing_price = float(swing["price"])
+            confirm_index = min(swing_index + self.cfg.swing_right, len(rows) - 1)
+            after = rows.iloc[confirm_index + 1 :]
+            if after.empty:
+                continue
+            breakdowns = after[after["close"] < swing_price]
+            if breakdowns.empty:
+                continue
+            break_index = int(breakdowns.index[0])
+            atr = max(float(rows.iloc[break_index].get("atr") or self._latest_atr(rows)), 1.0)
+            if swing_price - float(rows.iloc[break_index]["close"]) < atr * 0.1:
+                continue
+            swing_row = rows.iloc[swing_index]
+            zone_low = round(min(float(swing_row["open"]), float(swing_row["close"])), 2)
+            zone_high = round(max(float(swing_row["open"]), float(swing_row["close"])), 2)
+            if zone_high - zone_low < self.cfg.smart_min_zone_width_points:
+                half = self._zone_width(rows, swing_index) / 2
+                midpoint = (zone_low + zone_high) / 2
+                zone_low, zone_high = round(midpoint - half, 2), round(midpoint + half, 2)
+            out.append(self._raw_zone(
+                "bearish_breaker", zone_low, zone_high, break_index, "bearish",
+                [f"bearish breaker: former swing low at {round(swing_price, 2)} broken, now resistance"],
+            ))
+        return out
+
+    def _departure_fvg_score(self, rows: pd.DataFrame, index: int, direction: str) -> float:
+        if index < 2 or index >= len(rows):
+            return 0.0
+        first = rows.iloc[index - 2]
+        third = rows.iloc[index]
+        atr = max(float(rows.iloc[index].get("atr") or self._latest_atr(rows)), 1.0)
+        if direction == "bullish":
+            gap = float(third["low"]) - float(first["high"])
+        else:
+            gap = float(first["low"]) - float(third["high"])
+        if gap <= 0:
+            return 0.0
+        if gap >= atr * 0.5:
+            return 100.0
+        if gap >= atr * 0.2:
+            return 50.0
+        return 25.0
+
+    def _confluence_score(self, raw: dict[str, Any], all_raw: list[dict[str, Any]]) -> float:
+        zone_low = float(raw["low"])
+        zone_high = float(raw["high"])
+        raw_type = str(raw["zone_type"])
+        raw_direction = str(raw.get("direction", ""))
+        overlapping_types: set[str] = set()
+        for other in all_raw:
+            if other is raw:
+                continue
+            if str(other.get("direction", "")) != raw_direction:
+                continue
+            if not self._overlaps(zone_low, zone_high, float(other["low"]), float(other["high"])):
+                continue
+            other_type = str(other["zone_type"])
+            if other_type == raw_type:
+                continue
+            overlapping_types.add(other_type)
+        count = len(overlapping_types)
+        if count >= 3:
+            return 100.0
+        if count == 2:
+            return 70.0
+        if count == 1:
+            return 40.0
+        return 0.0
+
+    @staticmethod
+    def _departure_fvg_enhancer(departure_fvg_score: float) -> dict[str, Any]:
+        if departure_fvg_score >= 100.0:
+            points = 2.0
+        elif departure_fvg_score >= 50.0:
+            points = 1.0
+        else:
+            points = 0.0
+        return {"points": points, "fvg_score": round(float(departure_fvg_score), 2)}
+
     def _impulse_direction(self, rows: pd.DataFrame, index: int) -> str | None:
         row = rows.iloc[index]
         atr = max(float(row.get("atr") or self._latest_atr(rows)), 1.0)
@@ -569,12 +737,22 @@ class LevelEngine:
         if temp_strong_move_zone:
             reaction_score = max(reaction_score, 100.0)
         touch_quality_score = self._touch_quality_score(touch_count, reaction_count, break_count, crossed_count)
-        freshness_score = max(0.0, 100.0 - (touch_count * 18.0) - (break_count * 25.0))
+        if touch_count == 0:
+            freshness_score = 100.0
+        elif touch_count == 1:
+            freshness_score = 65.0
+        elif touch_count == 2:
+            freshness_score = 30.0
+        else:
+            freshness_score = max(0.0, 30.0 - (touch_count - 2) * 15.0)
+        freshness_score = max(0.0, freshness_score - break_count * 25.0)
         recency_score = self._recency_score(last_touched_at or created_at, rows.iloc[-1]["datetime"])
         htf_visibility_score = self._htf_visibility_score(raw, high - low, atr)
         volume_score = self._volume_score(rows, index)
         gap_overlap_score = self._overlap_score(raw, all_raw, {"gap_up", "gap_down"})
         liquidity_sweep_score = self._liquidity_sweep_score(rows, low, high, direction, raw)
+        departure_fvg_score = self._departure_fvg_score(rows, index, direction)
+        confluence_score = self._confluence_score(raw, all_raw)
         enhancers = self._zone_enhancers(
             raw=raw,
             all_raw=all_raw,
@@ -585,6 +763,7 @@ class LevelEngine:
             reaction_move_points=reaction_move_points,
             atr=atr,
             htf_visibility_score=htf_visibility_score,
+            departure_fvg_score=departure_fvg_score,
         )
         noise_penalty = self._noise_penalty(high - low, atr, break_count, crossed_count, reaction_score)
         score = self._final_score(
@@ -597,6 +776,8 @@ class LevelEngine:
             volume_score=volume_score,
             gap_overlap_score=gap_overlap_score,
             liquidity_sweep_score=liquidity_sweep_score,
+            departure_fvg_score=departure_fvg_score,
+            confluence_score=confluence_score,
             noise_penalty=noise_penalty,
         )
         notes = list(raw.get("notes") or [])
@@ -694,6 +875,7 @@ class LevelEngine:
         reaction_move_points: float,
         atr: float,
         htf_visibility_score: float,
+        departure_fvg_score: float = 0.0,
     ) -> dict[str, Any]:
         base_candle_count = int(raw.get("base_candle_count") or 1)
         enhancers = {
@@ -703,10 +885,11 @@ class LevelEngine:
             "risk_reward_space": self._risk_reward_space_enhancer(raw, all_raw, low, high, direction),
             "original_zone": self._original_zone_enhancer(raw, all_raw, low, high),
             "htf_overlap": self._htf_overlap_enhancer(htf_visibility_score),
+            "departure_fvg": self._departure_fvg_enhancer(departure_fvg_score),
         }
         total = sum(float(item["points"]) for item in enhancers.values())
         enhancers["total_points"] = round(total, 2)
-        enhancers["max_points"] = 14.0
+        enhancers["max_points"] = 16.0
         return enhancers
 
     @staticmethod
@@ -737,7 +920,7 @@ class LevelEngine:
         if touch_count <= 0:
             points = 3.0
         elif touch_count == 1:
-            points = 1.5
+            points = 1.0
         else:
             points = 0.0
         return {"points": points, "touch_count": int(touch_count)}
@@ -837,6 +1020,10 @@ class LevelEngine:
         zone_type = str(raw["zone_type"])
         if "gap" in zone_type:
             return 100.0
+        if "order_block" in zone_type:
+            return 90.0
+        if "breaker" in zone_type:
+            return 85.0
         if "liquidity" in zone_type:
             return 85.0
         if "swing" in zone_type:
@@ -1029,6 +1216,7 @@ class LevelEngine:
             "risk_reward_space",
             "original_zone",
             "htf_overlap",
+            "departure_fvg",
         ]
         merged: dict[str, Any] = {}
         for key in keys:
@@ -1036,7 +1224,7 @@ class LevelEngine:
             if candidates:
                 merged[key] = max(candidates, key=lambda item: float(item.get("points") or 0))
         merged["total_points"] = round(sum(float(merged.get(key, {}).get("points") or 0) for key in keys), 2)
-        merged["max_points"] = 14.0
+        merged["max_points"] = 16.0
         return merged
 
     @staticmethod

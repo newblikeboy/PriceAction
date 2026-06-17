@@ -185,14 +185,16 @@ class StrategyConfig:
     smart_level_weights: dict[str, float] = field(
         default_factory=lambda: {
             "reaction_score": 0.25,
-            "speed_score": 0.12,
-            "touch_quality_score": 0.15,
-            "freshness_score": 0.12,
-            "recency_score": 0.12,
-            "htf_visibility_score": 0.10,
+            "speed_score": 0.08,
+            "touch_quality_score": 0.13,
+            "freshness_score": 0.14,
+            "recency_score": 0.10,
+            "htf_visibility_score": 0.09,
             "volume_score": 0.05,
-            "gap_overlap_score": 0.04,
+            "gap_overlap_score": 0.03,
             "liquidity_sweep_score": 0.05,
+            "departure_fvg_score": 0.05,
+            "confluence_score": 0.03,
         }
     )
 

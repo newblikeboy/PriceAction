@@ -243,7 +243,7 @@ class ReplayBarSession:
         out: list[dict[str, Any]] = []
         for zone in result.strongest_zones[:12]:
             zone_type = str(zone.zone_type or "")
-            color = "#16a34a" if any(tag in zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows")) else "#dc2626"
+            color = "#16a34a" if any(tag in zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows", "bullish")) else "#dc2626"
             out.append(
                 {
                     "zone_id": zone.zone_id,

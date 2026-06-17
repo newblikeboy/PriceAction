@@ -683,7 +683,7 @@ class SmartTradeEngine:
                 "premium_discount": pd_context,
                 "fair_value_gap": fvg_context,
                 "structure_shift": structure,
-                "score_model": "smart_zone_break_confirmation",
+                "score_model": entry_model,
             },
         }
         option_contract = select_option_contract(
@@ -792,6 +792,11 @@ class SmartTradeEngine:
     ) -> int:
         expected = "bullish" if direction == "CE" else "bearish"
         score = 22 + int(zone.score * 0.35)
+        zone_tags = {tag for tag in zone.zone_type.split("+")}
+        if zone_tags & {"order_block_bullish", "order_block_bearish"}:
+            score += 6
+        if zone_tags & {"bullish_breaker", "bearish_breaker"}:
+            score += 8
         if setup == "SMART_ZONE_RETEST_CONFIRMATION":
             score += self.cfg.smart_trade_retest_score_bonus
         if setup == "SMART_ZONE_FLIP_RETEST_CONFIRMATION":
