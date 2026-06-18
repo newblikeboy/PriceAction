@@ -13,12 +13,32 @@ class FixedZoneSmartTradeEngine(SmartTradeEngine):
         super().__init__(cfg)
         self.fixed_zones = zones
 
-    def _known_zones(self, history: pd.DataFrame, current_price: float, as_of) -> list[SmartZone]:
+    def _known_zones(self, history: pd.DataFrame, current_price: float, as_of, trading_date=None) -> list[SmartZone]:
         return self.fixed_zones
 
 
-def test_trade_zone_history_lookback_is_temporarily_four_days() -> None:
-    assert StrategyConfig().smart_trade_zone_history_days == 4
+def test_trade_zone_history_lookback_is_two_days() -> None:
+    assert StrategyConfig().smart_trade_zone_history_days == 2
+
+
+def test_smart_trade_history_uses_previous_two_trading_days() -> None:
+    engine = SmartTradeEngine(_test_config())
+    rows = _history_rows(
+        [
+            "2024-01-04 09:15",
+            "2024-01-05 09:15",
+            "2024-01-08 09:15",
+            "2024-01-09 09:15",
+        ]
+    )
+
+    history = engine._history_before(rows, pd.Timestamp("2024-01-09 09:20"))
+
+    assert [str(day) for day in sorted(history["date"].unique())] == [
+        "2024-01-05",
+        "2024-01-08",
+        "2024-01-09",
+    ]
 
 
 def test_temporary_freshness_filter_is_enabled_by_default() -> None:
@@ -63,7 +83,9 @@ def test_smart_trade_requires_break_plus_confirmation() -> None:
     assert signal.direction == "CE"
     assert signal.time == "10:40"
     assert signal.entry_index_price == 126.0
-    assert signal.sl_index_price < zone.low
+    assert zone.low < signal.sl_index_price < signal.entry_index_price
+    assert signal.features["original_SL_price"] < zone.low
+    assert signal.features["smart_zone_sl_model"] == "zone_inner_fraction"
     assert signal.target_index_price == 190.0
     assert signal.features["smart_trade_grade"] in {"A+", "A", "B"}
     assert signal.features["entry_model"] == "break_confirmation"
@@ -86,22 +108,19 @@ def test_smart_trade_detects_retest_confirmation() -> None:
     assert retest.setup_score >= immediate.setup_score
 
 
-def test_smart_trade_detects_support_reaction_confirmation() -> None:
+def test_smart_trade_blocks_support_reaction_without_structure_or_fvg() -> None:
     zone = _zone("swing_low+breakout_base", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
     candles = _support_reaction_candles()
     levels = _wide_levels()
 
-    signals, _ = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
+    signals, skipped = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
 
-    signal = next(item for item in signals if item.setup_type == "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION")
-    assert signal.direction == "CE"
-    assert signal.features["entry_model"] == "support_reclaim_reaction"
-    assert signal.entry_index_price == 128.0
-    assert signal.sl_index_price < zone.low
+    assert not [item for item in signals if item.setup_type == "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION"]
+    assert [item for item in skipped if item.skip_reason == "Reaction lacks structure shift or unmitigated directional FVG"]
 
 
-def test_smart_trade_detects_support_flipped_resistance_short() -> None:
+def test_smart_trade_does_not_emit_removed_flip_retest_setup() -> None:
     zone = _zone("swing_low+breakout_base", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
     candles = _support_flipped_resistance_candles()
@@ -109,29 +128,13 @@ def test_smart_trade_detects_support_flipped_resistance_short() -> None:
 
     signals, _ = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
 
-    signal = next(item for item in signals if item.setup_type == "SMART_ZONE_FLIP_RETEST_CONFIRMATION")
-    assert signal.direction == "PE"
-    assert signal.features["entry_model"] == "support_flipped_resistance_retest"
-    assert signal.entry_index_price == 92.0
-    assert signal.sl_index_price > zone.high
-
-
-def test_smart_trade_blocks_flip_retest_against_premium_discount() -> None:
-    zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _resistance_flipped_support_candles()
-    levels = _short_premium_levels()
-
-    signals, skipped = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
-
     assert not [item for item in signals if item.setup_type == "SMART_ZONE_FLIP_RETEST_CONFIRMATION"]
-    assert [item for item in skipped if item.skip_reason == "Premium/discount context is against this smart-zone trade"]
 
 
-def test_smart_trade_blocks_flip_retest_without_valid_premium_discount() -> None:
+def test_smart_trade_blocks_reaction_without_structure_or_fvg_before_pd() -> None:
     zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _resistance_flipped_support_candles()
+    candles = _resistance_rejection_candles()
     levels = _invalid_pd_levels()
     all_rows = engine._rows(candles)
     day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
@@ -139,8 +142,8 @@ def test_smart_trade_blocks_flip_retest_without_valid_premium_discount() -> None
     row = day_rows.iloc[row_index]
 
     signal, reason, context = engine._build_signal(
-        direction="CE",
-        setup="SMART_ZONE_FLIP_RETEST_CONFIRMATION",
+        direction="PE",
+        setup="SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
         all_rows=all_rows,
         day_rows=day_rows,
         row_index=row_index,
@@ -149,38 +152,119 @@ def test_smart_trade_blocks_flip_retest_without_valid_premium_discount() -> None
         zone=zone,
         levels=levels,
         atr=10,
-        entry_model="resistance_flipped_support_retest",
+        entry_model="resistance_rejection",
+        htf_context={"enabled": True, "bias": "bearish", "reason": "test"},
+        target_zones=[zone],
+    )
+
+    assert signal is None
+    assert reason == "Reaction lacks structure shift or unmitigated directional FVG"
+    assert context["fair_value_gap"]["present"] is False
+
+
+def test_smart_trade_blocks_counter_pd_break_without_structure_confirmation() -> None:
+    zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
+    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
+    candles = _resistance_flipped_support_candles()
+    levels = _short_premium_levels()
+    all_rows = engine._rows(candles)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
+
+    signal, reason, context = engine._build_signal(
+        direction="CE",
+        setup="SMART_ZONE_BREAK_CONFIRMATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=levels,
+        atr=10,
+        entry_model="break_confirmation",
         htf_context={"enabled": True, "bias": "bullish", "reason": "test"},
         target_zones=[zone],
     )
 
     assert signal is None
-    assert reason == "Premium/discount context unavailable for flip-retest trade"
-    assert context["premium_discount"]["zone"] == "unknown"
+    assert reason == "Counter-PD zone break needs structure confirmation"
+    assert context["premium_discount"]["zone"] == "premium"
 
 
-def test_smart_trade_allows_a_plus_resistance_rejection_against_htf() -> None:
+def test_smart_trade_blocks_compressed_forward_space() -> None:
+    zone = _zone("breakout_base+swing_low", 100, 120, score=90)
+    zone.enhancers = {"risk_reward_space": {"space_width_ratio": 0.07}}
+    engine = SmartTradeEngine(_test_config())
+
+    assert engine._forward_space_filter_reason("SMART_ZONE_BREAK_CONFIRMATION", zone) == "Forward space to opposing zone is too compressed"
+
+
+def test_smart_trade_blocks_low_score_retest() -> None:
+    zone = _zone("swing_low", 100, 120, score=74)
+    engine = SmartTradeEngine(_test_config())
+    candles = _resistance_flipped_support_candles()
+    levels = _short_premium_levels()
+    all_rows = engine._rows(candles)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
+
+    signal, reason, context = engine._build_signal(
+        direction="PE",
+        setup="SMART_ZONE_RETEST_CONFIRMATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=levels,
+        atr=10,
+        entry_model="break_confirm_retest",
+        htf_context={"enabled": True, "bias": "bearish", "reason": "test"},
+        target_zones=[zone],
+    )
+
+    assert signal is None
+    assert reason == "Smart-zone retest setup score below retest threshold"
+    assert context["required_score"] == 75
+
+
+def test_smart_trade_blocks_weak_resistance_rejection_before_htf_override() -> None:
     zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
     candles = _resistance_rejection_candles()
-    levels = _short_premium_levels()
+    levels = _invalid_pd_levels()
     bullish_htf = {"enabled": True, "bias": "bullish", "reason": "test opposing HTF"}
+    all_rows = engine._rows(candles)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
 
-    signals, skipped = engine.generate_for_day(
-        candles,
-        levels,
-        pd.Timestamp("2024-01-01").date(),
-        htf_contexts={18: bullish_htf},
+    signal, reason, context = engine._build_signal(
+        direction="PE",
+        setup="SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=levels,
+        atr=10,
+        entry_model="resistance_rejection",
+        htf_context=bullish_htf,
+        target_zones=[zone],
     )
 
-    assert not [item for item in skipped if item.skip_reason == "HTF bias filter blocked smart-zone setup"]
-    signal = next(item for item in signals if item.setup_type == "SMART_ZONE_REJECTION_OVERRIDE")
-    assert signal.direction == "PE"
-    assert signal.features["entry_model"] == "resistance_rejection"
-    assert signal.features["HTF_override"] is True
+    assert signal is None
+    assert reason == "Reaction lacks structure shift or unmitigated directional FVG"
+    assert context["fair_value_gap"]["present"] is False
 
 
-def test_smart_trade_enters_sweep_reclaim_displacement_without_extra_wait() -> None:
+def test_smart_trade_does_not_emit_removed_sweep_reclaim_setup() -> None:
     zone = _zone("breakout_base+swing_low", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
     candles = _sweep_reclaim_displacement_candles()
@@ -188,12 +272,7 @@ def test_smart_trade_enters_sweep_reclaim_displacement_without_extra_wait() -> N
 
     signals, _ = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
 
-    signal = next(item for item in signals if item.setup_type == "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT")
-    assert signal.direction == "CE"
-    assert signal.features["entry_model"] == "sweep_reclaim_displacement"
-    assert signal.entry_index_price == 130.0
-    assert signal.sl_index_price == 93.0
-    assert signal.time == "10:45"
+    assert not [item for item in signals if item.setup_type == "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT"]
 
 
 def test_signal_engine_disables_legacy_exact_price_setups_by_default() -> None:
@@ -225,6 +304,17 @@ def _test_config() -> StrategyConfig:
         htf_bias_filter_enabled=True,
         htf_bias_allow_neutral=True,
     )
+
+
+def _history_rows(timestamps: list[str]) -> pd.DataFrame:
+    rows = [
+        _candle(pd.Timestamp(timestamp), 100.0, 105.0, 95.0, 101.0)
+        for timestamp in timestamps
+    ]
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["datetime"].dt.date
+    frame["time"] = frame["datetime"].dt.strftime("%H:%M")
+    return frame
 
 
 def _breakout_candles(*, include_retest: bool) -> pd.DataFrame:

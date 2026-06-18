@@ -53,13 +53,14 @@ class PaperTradeEngine:
         day = candles_5m[(candles_5m.index >= start) & (candles_5m["date"].astype(str) == trade.date)]
         active_sl = float(trade.sl_index_price)
         breakeven_active = False
+        profit_lock_active = False
         near_target_pct = float(getattr(self.cfg, "paper_near_target_exit_pct", 0.0) or 0.0)
         near_target_pct = min(max(near_target_pct, 0.0), 1.0)
         for ts, row in day.iterrows():
             self._update_excursions(trade, row)
             if trade.direction == "CE":
                 if row["low"] <= active_sl:
-                    return self._close(trade, ts, active_sl, "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
+                    return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
                 if row["high"] >= trade.target_index_price:
                     return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
                 near_target = trade.entry_index_price + (trade.reward_points * near_target_pct)
@@ -67,14 +68,23 @@ class PaperTradeEngine:
                     return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
             else:
                 if row["high"] >= active_sl:
-                    return self._close(trade, ts, active_sl, "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
+                    return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
                 if row["low"] <= trade.target_index_price:
                     return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
                 near_target = trade.entry_index_price - (trade.reward_points * near_target_pct)
                 if near_target_pct > 0 and row["low"] <= near_target:
                     return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
-            if not breakeven_active and trade.risk_points > 0:
-                if trade.max_favorable_excursion >= trade.risk_points * float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0):
+            if not breakeven_active and not profit_lock_active and trade.risk_points > 0:
+                lock_after_r = float(getattr(self.cfg, "paper_profit_lock_after_r", 0.0) or 0.0)
+                lock_r = float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0)
+                breakeven_after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
+                if lock_after_r > 0 and lock_r > 0 and trade.max_favorable_excursion >= trade.risk_points * lock_after_r:
+                    lock_points = trade.risk_points * lock_r
+                    active_sl = round(float(trade.entry_index_price + lock_points if trade.direction == "CE" else trade.entry_index_price - lock_points), 2)
+                    profit_lock_active = True
+                    trade.features["profit_lock_armed_at"] = ts.strftime("%H:%M")
+                    trade.features["profit_lock_R"] = round(lock_r, 3)
+                elif breakeven_after_r > 0 and trade.max_favorable_excursion >= trade.risk_points * breakeven_after_r:
                     active_sl = float(trade.entry_index_price)
                     breakeven_active = True
                     trade.features["breakeven_armed_at"] = ts.strftime("%H:%M")
@@ -90,12 +100,13 @@ class PaperTradeEngine:
             return trade
         active_sl = float(trade.features.get("active_sl_index_price") or trade.sl_index_price)
         breakeven_active = bool(trade.features.get("breakeven_active"))
+        profit_lock_active = bool(trade.features.get("profit_lock_active"))
         near_target_pct = float(getattr(self.cfg, "paper_near_target_exit_pct", 0.0) or 0.0)
         near_target_pct = min(max(near_target_pct, 0.0), 1.0)
         self._update_excursions(trade, row)
         if trade.direction == "CE":
             if row["low"] <= active_sl:
-                return self._close(trade, ts, active_sl, "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
+                return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
             if row["high"] >= trade.target_index_price:
                 return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
             near_target = trade.entry_index_price + (trade.reward_points * near_target_pct)
@@ -103,15 +114,23 @@ class PaperTradeEngine:
                 return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
         else:
             if row["high"] >= active_sl:
-                return self._close(trade, ts, active_sl, "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
+                return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
             if row["low"] <= trade.target_index_price:
                 return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
             near_target = trade.entry_index_price - (trade.reward_points * near_target_pct)
             if near_target_pct > 0 and row["low"] <= near_target:
                 return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
-        if not breakeven_active and trade.risk_points > 0:
-            after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
-            if after_r > 0 and trade.max_favorable_excursion >= trade.risk_points * after_r:
+        if not breakeven_active and not profit_lock_active and trade.risk_points > 0:
+            lock_after_r = float(getattr(self.cfg, "paper_profit_lock_after_r", 0.0) or 0.0)
+            lock_r = float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0)
+            breakeven_after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
+            if lock_after_r > 0 and lock_r > 0 and trade.max_favorable_excursion >= trade.risk_points * lock_after_r:
+                lock_points = trade.risk_points * lock_r
+                trade.features["active_sl_index_price"] = round(float(trade.entry_index_price + lock_points if trade.direction == "CE" else trade.entry_index_price - lock_points), 2)
+                trade.features["profit_lock_active"] = True
+                trade.features["profit_lock_armed_at"] = ts.strftime("%H:%M")
+                trade.features["profit_lock_R"] = round(lock_r, 3)
+            elif breakeven_after_r > 0 and trade.max_favorable_excursion >= trade.risk_points * breakeven_after_r:
                 trade.features["active_sl_index_price"] = round(float(trade.entry_index_price), 2)
                 trade.features["breakeven_active"] = True
                 trade.features["breakeven_armed_at"] = ts.strftime("%H:%M")

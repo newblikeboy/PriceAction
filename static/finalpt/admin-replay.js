@@ -42,6 +42,7 @@
   let renderTimer = null;
   let tradePriceLines = [];
   let latestZones = [];
+  let latestCurrentTime = null;
   let zoneRedrawTimer = null;
   let activeSessionId = null;
   let lastVisibleCandles = 0;
@@ -190,22 +191,29 @@
 
   function scheduleZoneRedraw() {
     window.requestAnimationFrame(function () {
-      applyZones(latestZones);
+      applyZones(latestZones, latestCurrentTime);
     });
     window.clearTimeout(zoneRedrawTimer);
     zoneRedrawTimer = window.setTimeout(function () {
-      applyZones(latestZones);
+      applyZones(latestZones, latestCurrentTime);
     }, 80);
     window.setTimeout(function () {
-      applyZones(latestZones);
+      applyZones(latestZones, latestCurrentTime);
     }, 180);
   }
 
-  function applyZones(zones) {
+  function applyZones(zones, currentTime) {
     latestZones = zones || [];
+    if (currentTime) latestCurrentTime = currentTime;
     zoneLayer.innerHTML = "";
     const paneOffsetTop = chartPaneOffsetTop();
-    latestZones.forEach(function (zone) {
+    // Filter: anchor zones always visible; intraday zones only after they formed
+    const visibleZones = latestZones.filter(function (zone) {
+      if (!zone.formed_at) return true;
+      if (!latestCurrentTime) return true;
+      return zone.formed_at <= latestCurrentTime;
+    });
+    visibleZones.forEach(function (zone) {
       const low = Number(zone.low);
       const high = Number(zone.high);
       if (!Number.isFinite(low) || !Number.isFinite(high) || high <= low) {
@@ -219,15 +227,22 @@
       const band = document.createElement("div");
       const top = paneOffsetTop + Math.min(topCoordinate, bottomCoordinate);
       const height = Math.max(3, Math.abs(bottomCoordinate - topCoordinate));
-      band.className = "chart-zone-band";
+      // Focus zones (closest to price) = bolder; intraday zones = dashed; anchors = default
+      band.className = zone.is_focus
+        ? "chart-zone-band chart-zone-focus"
+        : zone.is_anchor
+        ? "chart-zone-band"
+        : "chart-zone-band chart-zone-intraday";
       band.style.top = `${top}px`;
       band.style.height = `${height}px`;
       band.style.setProperty("--zone-color", zone.color || "#64748b");
-      band.title = `${zone.name || "ZONE"} ${low.toFixed(2)}-${high.toFixed(2)} Score ${zone.score || "--"}`;
+      const origin = zone.is_anchor ? "prior session" : "today";
+      band.title = `${zone.name || "ZONE"} ${low.toFixed(2)}-${high.toFixed(2)} | Score ${zone.score || "--"} | ${origin}${zone.is_focus ? " ★ FOCUS" : ""}`;
 
       const label = document.createElement("span");
       label.className = "chart-zone-label";
-      label.textContent = `${String(zone.name || "ZONE").slice(0, 24)} ${low.toFixed(0)}-${high.toFixed(0)}`;
+      const focusMark = zone.is_focus ? " ★" : "";
+      label.textContent = `${String(zone.name || "ZONE").slice(0, 22)} ${low.toFixed(0)}-${high.toFixed(0)}${focusMark}`;
       band.appendChild(label);
       zoneLayer.appendChild(band);
     });
@@ -360,7 +375,7 @@
     activeSessionId = payload.session_id || activeSessionId;
     lastVisibleCandles = Number(payload.visible_candles || 0);
     forceFitNextUpdate = false;
-    applyZones(payload.zones || []);
+    applyZones(payload.zones || [], payload.current_time);
     scheduleZoneRedraw();
     applyTradeLevels(payload.trade_levels || []);
     renderTrades(payload.trades || []);
@@ -383,7 +398,7 @@
 
   function updateReplayTablesOnly(payload) {
     candleSeries.setMarkers(payload.markers || []);
-    applyZones(payload.zones || []);
+    applyZones(payload.zones || [], payload.current_time);
     scheduleZoneRedraw();
     applyTradeLevels(payload.trade_levels || []);
     renderTrades(payload.trades || []);
@@ -444,7 +459,7 @@
           activeSessionId = frame.session_id || activeSessionId;
           lastVisibleCandles = Number(frame.visible_candles || 0);
           forceFitNextUpdate = false;
-          applyZones(frame.zones || []);
+          applyZones(frame.zones || [], frame.current_time);
           scheduleZoneRedraw();
           applyTradeLevels(frame.trade_levels || []);
           renderTrades(frame.trades || []);
@@ -541,7 +556,7 @@
       symbol: data.get("symbol") || "NIFTY",
       start_date: data.get("start_date"),
       end_date: data.get("end_date"),
-      context_trading_days: Number(data.get("context_trading_days") || 4),
+      context_trading_days: Number(data.get("context_trading_days") || 2),
     })
       .then(updateReplay)
       .catch(function (error) {

@@ -52,6 +52,7 @@
         <button type="button" class="side-nav-btn" data-view-target="chart">Live Chart</button>
         <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
         <button type="button" class="side-nav-btn" data-view-target="replay">Replay Bar</button>
+        <button type="button" class="side-nav-btn" data-view-target="zone-detection">Zone Detection</button>
         <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
@@ -273,12 +274,12 @@
             </div>
             <span id="replay-status-chip" class="status-chip">not loaded</span>
           </div>
-          <p class="small">Loads selected 5m candles into memory, uses the previous 4 trading days as hidden engine context, then reveals one selected candle at a time with smart zones and replay trades.</p>
+          <p class="small">Loads selected 5m candles into memory, uses the previous 2 trading days as hidden engine context, then reveals one selected candle at a time with smart zones and replay trades.</p>
           <form id="replay-load-form" class="backtest-form replay-load-form">
             <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
             <label class="field"><span>From Date</span><input class="text-input" type="date" name="start_date" required></label>
             <label class="field"><span>To Date</span><input class="text-input" type="date" name="end_date" required></label>
-            <label class="field"><span>Context Days</span><input class="text-input" type="number" name="context_trading_days" value="4" min="0" max="20"></label>
+            <label class="field"><span>Context Days</span><input class="text-input" type="number" name="context_trading_days" value="2" min="0" max="20"></label>
             <button id="replay-load-btn" class="action-btn" type="submit">Load Replay</button>
           </form>
           <div class="action-row replay-controls">
@@ -342,6 +343,65 @@
         </article>
       </section>
 
+      <section class="portal-view" data-view="zone-detection" hidden>
+        <article class="card view-card">
+          <div class="line-head">
+            <div>
+              <p class="label">Zone Engine Detection</p>
+              <h2>Smart Zone Builder</h2>
+            </div>
+            <span id="zd-status-chip" class="status-chip">not loaded</span>
+          </div>
+          <p class="small">Select a date range. All days except the last are computed from their complete session data (anchor zones). The last day is revealed candle by candle — no lookahead.</p>
+          <form id="zd-load-form" class="backtest-form replay-load-form">
+            <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
+            <label class="field"><span>Start Date</span><input class="text-input" type="date" name="start_date" required></label>
+            <label class="field"><span>End Date</span><input class="text-input" type="date" name="end_date" required></label>
+            <button id="zd-load-btn" class="action-btn" type="submit">Create Zones</button>
+          </form>
+          <div class="action-row replay-controls">
+            <button id="zd-prev-btn" class="ghost-btn" type="button" disabled>Previous</button>
+            <button id="zd-next-btn" class="action-btn" type="button" disabled>Next Candle</button>
+            <button id="zd-play-btn" class="ghost-btn" type="button" disabled>Play</button>
+            <button id="zd-reset-btn" class="ghost-btn" type="button" disabled>Reset</button>
+            <label class="field replay-speed-field"><span>Speed</span><input id="zd-speed-input" class="text-input" type="number" value="600" min="150" max="3000" step="50"></label>
+          </div>
+          <p id="zd-message" class="small"></p>
+        </article>
+
+        <article class="card chart-panel-card replay-chart-card">
+          <div class="line-head chart-head">
+            <div>
+              <p class="label">Zone Chart</p>
+              <h2 id="zd-chart-title">Load a date range to start</h2>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;">
+              <span id="zd-anchor-count" class="status-chip">Anchor: 0</span>
+              <span id="zd-intraday-count" class="status-chip">Intraday: 0</span>
+              <strong id="zd-candle-counter" class="mono">0 / 0</strong>
+            </div>
+          </div>
+          <div class="chart-stage replay-chart-stage">
+            <div id="zd-chart" class="live-chart tradingview-like-chart"></div>
+          </div>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Detected Zones</h2></div>
+          <div class="paper-table-wrap replay-table-wrap">
+            <table class="paper-table">
+              <thead>
+                <tr>
+                  <th>Source</th><th>Type</th><th>Low</th><th>High</th><th>Score</th>
+                  <th>Status</th><th>Touches</th><th>Reactions</th><th>Breaks</th><th>Freshness</th><th>Enhancers</th>
+                </tr>
+              </thead>
+              <tbody id="zd-zones-body"><tr><td colspan="11" class="small">No zones yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
       <section class="portal-view" data-view="paper" hidden>
         <section class="grid paper-grid">
           <article class="card">
@@ -395,6 +455,7 @@
   <script src="/static/finalpt/panel.js?v=admin-backtest-fit-1"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/finalpt/admin-chart.js?v=zone-ranges-4"></script>
-  <script src="/static/finalpt/admin-replay.js?v=replay-context-days-1"></script>
+  <script src="/static/finalpt/admin-replay.js?v=replay-context-days-2"></script>
+  <script src="/static/finalpt/admin-zone-detection.js?v=1"></script>
 </body>
 </html>

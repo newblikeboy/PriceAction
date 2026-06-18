@@ -148,18 +148,18 @@ class LevelEngine:
         rows = self._rows(candles)
         if rows.empty:
             return pd.Series(dtype="float64")
+        # If _rows() already computed a gap-free ATR, use it directly
+        if "atr" in rows.columns:
+            existing = pd.to_numeric(rows["atr"], errors="coerce")
+            if not existing.dropna().empty:
+                return existing
         high = pd.to_numeric(rows["high"], errors="coerce")
         low = pd.to_numeric(rows["low"], errors="coerce")
         close = pd.to_numeric(rows["close"], errors="coerce")
         previous_close = close.shift(1)
-        true_range = pd.concat(
-            [
-                high - low,
-                (high - previous_close).abs(),
-                (low - previous_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
+        new_session = rows["date"] != rows["date"].shift(1)
+        tr_full = pd.concat([(high - low), (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(axis=1)
+        true_range = tr_full.where(~new_session, high - low)
         return true_range.rolling(period or self.cfg.smart_atr_period, min_periods=1).mean()
 
     def merge_zones(self, zones: list[SmartZone], atr: float | None = None, *, strict: bool = False) -> list[SmartZone]:
@@ -182,7 +182,7 @@ class LevelEngine:
                     clusters[target].extend(clusters.pop(index))
             else:
                 clusters.append([zone])
-            clusters = self._merge_compatible_clusters(clusters, tolerance, max_cluster_span)
+        clusters = self._merge_compatible_clusters(clusters, tolerance, max_cluster_span)
         merged = [self._merge_cluster(cluster, atr_value) for cluster in clusters]
         return self._dedupe_merged_zones(merged, atr_value, tolerance, max_cluster_span)
 
@@ -819,33 +819,30 @@ class LevelEngine:
         direction: str,
         atr: float,
     ) -> tuple[int, int, int, Any | None, int]:
-        touch_count = 0
-        reaction_count = 0
-        break_count = 0
-        crossed_count = 0
+        if rows.empty:
+            return 0, 0, 0, None, 0
+        h = rows["high"].to_numpy(dtype=float)
+        l = rows["low"].to_numpy(dtype=float)
+        c = rows["close"].to_numpy(dtype=float)
+        touched_mask = (l <= high) & (h >= low)
+        touch_count = int(touched_mask.sum())
+        if direction == "bullish":
+            reaction_mask = touched_mask & (c > high)
+            in_break = c < low
+        else:
+            reaction_mask = touched_mask & (c < low)
+            in_break = c > high
+        reaction_count = int(reaction_mask.sum())
+        # Count distinct break EPISODES: each transition into break territory = 1 break.
+        # 30 consecutive candles above zone.high = one break episode, not 30.
+        prev_in_break = in_break[:-1]
+        episode_starts = in_break[1:] & ~prev_in_break
+        break_count = int(episode_starts.sum()) + (1 if len(in_break) > 0 and in_break[0] else 0)
+        crossed_count = int(((h > high) & (l < low)).sum())
         last_touched_at = None
-        for _, row in rows.iterrows():
-            candle_high = float(row["high"])
-            candle_low = float(row["low"])
-            close = float(row["close"])
-            touched = candle_low <= high and candle_high >= low
-            if touched:
-                touch_count += 1
-                last_touched_at = row["datetime"]
-                if direction == "bullish" and close > high:
-                    reaction_count += 1
-                elif direction == "bearish" and close < low:
-                    reaction_count += 1
-            if direction == "bullish":
-                if close < low:
-                    break_count += 1
-                if candle_high > high and candle_low < low:
-                    crossed_count += 1
-            else:
-                if close > high:
-                    break_count += 1
-                if candle_high > high and candle_low < low:
-                    crossed_count += 1
+        if touch_count > 0:
+            touched_idx = rows.index[touched_mask]
+            last_touched_at = rows.at[touched_idx[-1], "datetime"]
         return touch_count, reaction_count, break_count, last_touched_at, crossed_count
 
     def _reaction_score(self, rows: pd.DataFrame, low: float, high: float, direction: str, atr: float) -> float:
@@ -1437,6 +1434,18 @@ class LevelEngine:
         rows = rows.sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
         rows["date"] = rows["datetime"].dt.date
         rows["time"] = rows["datetime"].dt.strftime("%H:%M")
+        if "atr" not in rows.columns or pd.to_numeric(rows["atr"], errors="coerce").dropna().empty:
+            high = rows["high"]
+            low = rows["low"]
+            close = rows["close"]
+            prev_close = close.shift(1)
+            # For the first candle of each new session, skip the gap component (prev_close is
+            # from a different day). Using H-L only there prevents overnight gaps from inflating
+            # ATR and destroying zone clustering (e.g. a 220pt gap makes cluster span = 1100pt).
+            new_session = rows["date"] != rows["date"].shift(1)
+            tr_full = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+            tr = tr_full.where(~new_session, high - low)
+            rows["atr"] = tr.rolling(self.cfg.smart_atr_period, min_periods=1).mean()
         return rows
 
     def _session_rows(self, candles: pd.DataFrame) -> pd.DataFrame:

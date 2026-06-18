@@ -31,7 +31,7 @@ class ReplayBarSession:
     end_date: str
     candles_5m: pd.DataFrame
     warmup_candles: int = 30
-    context_trading_days: int = 4
+    context_trading_days: int = 2
     cfg: StrategyConfig = config
     session_id: str = field(default_factory=lambda: uuid4().hex)
     current_index: int = field(init=False)
@@ -234,30 +234,45 @@ class ReplayBarSession:
         cached = self._chart_zone_cache.get(anchor_index)
         if cached is not None:
             return cached
+
         anchor_index = max(0, min(anchor_index, len(self.candles_5m) - 1))
         anchor_ts = pd.to_datetime(self.candles_5m.index[anchor_index])
         anchor_visible = self.candles_5m.iloc[: anchor_index + 1].copy()
         anchor_price = float(self.candles_5m.iloc[anchor_index]["close"])
         zone_history = self._zone_history(anchor_visible, anchor_ts)
         result = self.levels.calculate_smart_zones(zone_history, current_price=anchor_price, as_of=anchor_ts)
+
+        today_date = anchor_ts.date()
+        atr = max(float(result.atr or 1.0), 1.0)
+
+        # Focus = top 5 zones closest to current price with score >= 70
+        all_zones = result.strongest_zones[:15]
+        zones_by_distance = sorted(all_zones, key=lambda z: abs(float(z.midpoint) - anchor_price))
+        focus_ids = {z.zone_id for z in zones_by_distance[:5] if float(z.score) >= 70}
+
         out: list[dict[str, Any]] = []
-        for zone in result.strongest_zones[:12]:
+        for zone in all_zones:
             zone_type = str(zone.zone_type or "")
             color = "#16a34a" if any(tag in zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows", "bullish")) else "#dc2626"
-            out.append(
-                {
-                    "zone_id": zone.zone_id,
-                    "name": zone_type.upper().replace("_", " "),
-                    "zone_type": zone.zone_type,
-                    "low": round(float(zone.low), 2),
-                    "high": round(float(zone.high), 2),
-                    "midpoint": round(float(zone.midpoint), 2),
-                    "score": zone.score,
-                    "status": zone.status,
-                    "enhancers": zone.enhancers,
-                    "color": color,
-                }
-            )
+            created_date = pd.to_datetime(zone.created_at).date()
+            is_anchor = created_date < today_date
+            out.append({
+                "zone_id": zone.zone_id,
+                "name": zone_type.upper().replace("_", " "),
+                "zone_type": zone.zone_type,
+                "low": round(float(zone.low), 2),
+                "high": round(float(zone.high), 2),
+                "midpoint": round(float(zone.midpoint), 2),
+                "score": zone.score,
+                "status": zone.status,
+                "enhancers": zone.enhancers,
+                "color": color,
+                # When this zone became visible to a trader (None = prior-session, always shown)
+                "formed_at": None if is_anchor else str(zone.created_at),
+                "is_anchor": is_anchor,
+                # Nearest high-scoring zones to current price = lookahead focus
+                "is_focus": zone.zone_id in focus_ids,
+            })
         self._chart_zone_cache[anchor_index] = out
         return out
 
@@ -272,8 +287,11 @@ class ReplayBarSession:
         days = int(getattr(self.cfg, "smart_trade_zone_history_days", 0) or 0)
         if days <= 0:
             return visible
-        start = pd.to_datetime(current_ts) - pd.Timedelta(days=max(days, 1))
-        history = visible[visible.index >= start]
+        current_date = pd.to_datetime(current_ts).date()
+        previous_dates = sorted({day for day in visible["date"].unique() if day < current_date})
+        keep_dates = set(previous_dates[-days:])
+        keep_dates.add(current_date)
+        history = visible[visible["date"].isin(keep_dates)]
         return history if not history.empty else visible
 
     def _trade_levels_payload(self) -> list[dict[str, Any]]:

@@ -30,7 +30,7 @@
   let zoneRedrawTimer = null;
 
   function cacheKey() {
-    return `priceAction.chart.${timeframe}.90`;
+    return `priceAction.chart.${timeframe}.30`;
   }
 
   const chart = LightweightCharts.createChart(chartEl, {
@@ -215,17 +215,21 @@
       const top = paneOffsetTop + Math.min(topCoordinate, bottomCoordinate);
       const height = Math.max(3, Math.abs(bottomCoordinate - topCoordinate));
       const band = document.createElement("div");
-      band.className = "chart-zone-band";
+      band.className = zone.is_focus
+        ? "chart-zone-band chart-zone-focus"
+        : zone.is_anchor
+        ? "chart-zone-band"
+        : "chart-zone-band chart-zone-intraday";
       band.style.top = `${top}px`;
       band.style.height = `${height}px`;
-      band.style.borderColor = zone.color || "#64748b";
-      band.style.backgroundColor = zone.color || "#64748b";
       band.style.setProperty("--zone-color", zone.color || "#64748b");
-      band.title = `${shortZoneName(zone.name)} ${low.toFixed(2)} - ${high.toFixed(2)} Score ${zone.score || "--"}`;
+      const origin = zone.is_anchor ? "prior session" : "today";
+      band.title = `${shortZoneName(zone.name)} ${low.toFixed(2)}-${high.toFixed(2)} | Score ${zone.score || "--"} | ${origin}${zone.is_focus ? " ★ FOCUS" : ""}`;
 
       const label = document.createElement("span");
       label.className = "chart-zone-label";
-      label.textContent = `${shortZoneName(zone.name)} ${low.toFixed(0)}-${high.toFixed(0)}`;
+      const focusMark = zone.is_focus ? " ★" : "";
+      label.textContent = `${shortZoneName(zone.name)} ${low.toFixed(0)}-${high.toFixed(0)}${focusMark}`;
       band.appendChild(label);
       zoneLayer.appendChild(band);
     });
@@ -372,7 +376,7 @@
       }
     }
     fullRequestInFlight = true;
-    fetch(`/api/admin/live-chart?timeframe=${encodeURIComponent(timeframe)}&days=90&live=true`, {
+    fetch(`/api/admin/live-chart?timeframe=${encodeURIComponent(timeframe)}&days=30&live=true`, {
       headers: { Accept: "application/json", "X-Requested-With": "fetch" },
     })
       .then(function (response) {

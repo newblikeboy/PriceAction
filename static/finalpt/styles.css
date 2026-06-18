@@ -535,6 +535,23 @@ body {
   opacity: 0.55;
 }
 
+/* Intraday zones: dashed border, slightly different fill — appeared during today's session */
+.chart-zone-band.chart-zone-intraday {
+  border-top: 1px dashed color-mix(in srgb, var(--zone-color) 55%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--zone-color) 55%, transparent);
+  background: color-mix(in srgb, var(--zone-color) 7%, transparent);
+  opacity: 0.65;
+}
+
+/* Focus zones: nearest high-score zones to current price — lookahead watch targets */
+.chart-zone-band.chart-zone-focus {
+  border-top: 2px solid color-mix(in srgb, var(--zone-color) 75%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--zone-color) 75%, transparent);
+  background: color-mix(in srgb, var(--zone-color) 12%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 0 4px color-mix(in srgb, var(--zone-color) 20%, transparent);
+  opacity: 0.9;
+}
+
 .chart-zone-label {
   position: absolute;
   right: 3.25rem;

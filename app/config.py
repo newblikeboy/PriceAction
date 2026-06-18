@@ -137,7 +137,7 @@ class StrategyConfig:
     smart_cluster_atr_multiplier: float = 0.6
     smart_zone_atr_multiplier: float = 0.8
     smart_min_zone_score: float = 55.0
-    smart_max_distance_from_current_price_atr: float = 20.0
+    smart_max_distance_from_current_price_atr: float = 80.0
     smart_max_allowed_breaks: int = 3
     smart_min_reaction_atr: float = 1.2
     smart_quality_displacement_atr: float = 1.4
@@ -153,20 +153,23 @@ class StrategyConfig:
     smart_trade_min_zone_score: float = 60.0
     smart_trade_confirmation_window_candles: int = 2
     smart_trade_retest_window_candles: int = 8
+    smart_trade_retest_min_score: int = 75
     smart_trade_max_chase_atr: float = 1.5
     smart_trade_sl_atr_buffer: float = 0.20
+    smart_trade_sl_zone_inner_fraction: float = 0.25
     smart_trade_retest_score_bonus: int = 8
-    smart_trade_reaction_min_zone_score: float = 85.0
-    smart_trade_zone_history_days: int = 4
+    smart_trade_reaction_min_zone_score: float = 75.0
+    smart_trade_zone_history_days: int = 2
     smart_trade_zone_refresh_candles: int = 12
     smart_trade_htf_override_min_score: int = 75
     smart_trade_htf_override_min_zone_score: float = 80.0
     smart_trade_rejection_override_min_zone_score: float = 85.0
     smart_trade_sweep_reclaim_min_body_pct: float = 0.55
     smart_trade_sweep_reclaim_min_range_atr: float = 1.0
-    smart_trade_counter_pd_min_score: int = 85
-    smart_trade_counter_pd_min_zone_score: float = 85.0
-    smart_trade_reaction_requires_hold: bool = True
+    smart_trade_counter_pd_min_score: int = 72
+    smart_trade_counter_pd_min_zone_score: float = 78.0
+    smart_trade_reaction_requires_hold: bool = False
+    smart_trade_min_forward_space_width_ratio: float = 0.10
     # TEMP strong-zone experiment: remove these three fields and the matching TEMP checks in levels.py to revert.
     smart_temp_strong_move_zone_enabled: bool = False
     smart_temp_strong_move_points: float = 100.0
@@ -181,6 +184,8 @@ class StrategyConfig:
         "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
     )
     paper_breakeven_after_r: float = 1.0
+    paper_profit_lock_after_r: float = 1.0
+    paper_profit_lock_r: float = 0.5
     paper_near_target_exit_pct: float = 0.95
     smart_level_weights: dict[str, float] = field(
         default_factory=lambda: {

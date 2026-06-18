@@ -31,6 +31,7 @@ class SmartTradeEngine:
         self.option_snapshot: dict[str, Any] | None = None
         self._snapshot_cache: dict[pd.Timestamp, tuple[list[SmartZone], float]] = {}
         self._htf_context_cache: dict[pd.Timestamp, dict[str, Any]] = {}
+        self._prev_day_zones_cache: dict[date, list[SmartZone]] = {}
 
     def generate_for_day(
         self,
@@ -49,6 +50,7 @@ class SmartTradeEngine:
         if day_rows.empty:
             return signals, skipped
 
+        self._previous_day_zones(all_rows, trading_date)
         seen: set[tuple[str, str, str]] = set()
         one_shot_taken: set[tuple[str, str, str]] = set()
         cached_zones: list[SmartZone] = []
@@ -65,39 +67,10 @@ class SmartTradeEngine:
             atr = self._latest_atr(history)
             refresh_every = max(int(self.cfg.smart_trade_zone_refresh_candles), 1)
             if break_index - last_zone_refresh_index >= refresh_every:
-                cached_zones = self._known_zones(history, previous_close, break_row["datetime"])
+                cached_zones = self._known_zones(all_rows, previous_close, break_row["datetime"], trading_date)
                 last_zone_refresh_index = int(break_index)
             zones = cached_zones
             for zone in zones:
-                sweep_reclaim = self._sweep_reclaim_displacement_setup(zone, break_row, atr)
-                if sweep_reclaim is not None:
-                    setup, direction, entry_model = sweep_reclaim
-                    one_shot_key = (zone.zone_id, direction, setup)
-                    if one_shot_key in one_shot_taken:
-                        continue
-                    key = (zone.zone_id, setup, str(break_row["datetime"]))
-                    if key not in seen:
-                        seen.add(key)
-                        signal = self._build_signal(
-                            direction=direction,
-                            setup=setup,
-                            all_rows=all_rows,
-                            day_rows=day_rows,
-                            row_index=int(break_index),
-                            row=break_row,
-                            break_row=break_row,
-                            zone=zone,
-                            levels=levels,
-                            atr=atr,
-                            entry_model=entry_model,
-                            htf_context=(htf_contexts or {}).get(int(break_index), {}),
-                            target_zones=zones,
-                        )
-                        self._append(signal, skipped, break_row, direction, setup, signals)
-                        if signal[0] is not None:
-                            one_shot_taken.add(one_shot_key)
-                    continue
-
                 direction = self._break_direction(zone, previous_close, float(break_row["close"]))
                 key = (zone.zone_id, direction, str(break_row["datetime"]))
                 if direction is not None and key in seen:
@@ -187,7 +160,6 @@ class SmartTradeEngine:
             return signals, skipped
 
         seen: set[tuple[str, str, str]] = set()
-        signals.extend(self._candle_sweep_reclaim_displacements(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         signals.extend(self._candle_break_confirmations(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         signals.extend(self._candle_retest_confirmations(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         signals.extend(self._candle_reaction_holds(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
@@ -448,15 +420,56 @@ class SmartTradeEngine:
             )
             self._append(retest_signal, skipped, retest_row, direction, "SMART_ZONE_RETEST_CONFIRMATION", signals)
 
-    def _known_zones(self, history: pd.DataFrame, current_price: float, as_of: Any) -> list[SmartZone]:
-        result = self.levels.calculate_smart_zones(history, current_price=current_price, as_of=as_of)
-        return [
-            zone
-            for zone in result.zones
+    def _known_zones(self, all_rows: pd.DataFrame, current_price: float, as_of: Any, trading_date: date | None = None) -> list[SmartZone]:
+        as_of_ts = pd.to_datetime(as_of)
+
+        # Layer 1: zones from completed previous sessions (computed once, cached)
+        prev_zones = self._previous_day_zones(all_rows, trading_date) if trading_date is not None else []
+
+        # Layer 2: zones forming candle by candle from today's session
+        intraday_zones: list[SmartZone] = []
+        if trading_date is not None:
+            today_rows = all_rows[(all_rows["date"] == trading_date) & (all_rows["datetime"] <= as_of_ts)]
+            if not today_rows.empty:
+                intraday_result = self.levels.calculate_smart_zones(today_rows, current_price=current_price, as_of=as_of)
+                intraday_zones = [
+                    zone for zone in intraday_result.zones
+                    if zone.score >= self.cfg.smart_trade_min_zone_score
+                    and zone.status != "broken"
+                    and zone.break_count <= self.cfg.smart_max_allowed_breaks
+                ]
+
+        # Merge both layers, prev day zones first (higher priority), dedup by zone_id
+        seen_ids: set[str] = set()
+        combined: list[SmartZone] = []
+        for zone in prev_zones + intraday_zones:
+            if zone.zone_id not in seen_ids:
+                seen_ids.add(zone.zone_id)
+                combined.append(zone)
+        return combined
+
+    def _previous_day_zones(self, all_rows: pd.DataFrame, trading_date: date) -> list[SmartZone]:
+        cached = self._prev_day_zones_cache.get(trading_date)
+        if cached is not None:
+            return cached
+        prev_rows = all_rows[all_rows["date"] < trading_date]
+        days = int(getattr(self.cfg, "smart_trade_zone_history_days", 0) or 0)
+        if days > 0 and not prev_rows.empty:
+            previous_dates = sorted({day for day in prev_rows["date"].unique() if day < trading_date})
+            prev_rows = prev_rows[prev_rows["date"].isin(set(previous_dates[-days:]))]
+        if prev_rows.empty:
+            self._prev_day_zones_cache[trading_date] = []
+            return []
+        current_price = float(prev_rows.iloc[-1]["close"])
+        result = self.levels.calculate_smart_zones(prev_rows, current_price=current_price)
+        zones = [
+            zone for zone in result.zones
             if zone.score >= self.cfg.smart_trade_min_zone_score
             and zone.status != "broken"
             and zone.break_count <= self.cfg.smart_max_allowed_breaks
         ]
+        self._prev_day_zones_cache[trading_date] = zones
+        return zones
 
     def _break_direction(self, zone: SmartZone, previous_close: float, close: float) -> str | None:
         if self._is_resistance(zone) and previous_close <= zone.high and close > zone.high:
@@ -475,17 +488,12 @@ class SmartTradeEngine:
         bearish = close < open_price
 
         if self._is_support(zone):
-            if previous_close < zone.low and close < zone.low and bearish:
-                return ("SMART_ZONE_FLIP_RETEST_CONFIRMATION", "PE", "support_flipped_resistance_retest")
             if previous_close >= zone.low and close > zone.high and bullish:
                 return ("SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "CE", "support_reclaim_reaction")
 
         if self._is_resistance(zone):
-            if previous_close > zone.high and close > zone.high and bullish:
-                return ("SMART_ZONE_FLIP_RETEST_CONFIRMATION", "CE", "resistance_flipped_support_retest")
             if previous_close <= zone.high and close < zone.low and bearish:
-                setup = "SMART_ZONE_REJECTION_OVERRIDE" if self._is_a_plus_rejection_zone(zone) else "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"
-                return (setup, "PE", "resistance_rejection")
+                return ("SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION", "PE", "resistance_rejection")
         return None
 
     def _sweep_reclaim_displacement_setup(self, zone: SmartZone, row: pd.Series, atr: float) -> tuple[str, str, str] | None:
@@ -570,10 +578,11 @@ class SmartTradeEngine:
         buffer = self.cfg.sl_buffer_points + (atr * self.cfg.smart_trade_sl_atr_buffer)
         if direction == "CE":
             sl = round(min(float(zone.low), float(break_row["low"]), float(row["low"])) - buffer, 2)
-            risk = entry - sl
         else:
             sl = round(max(float(zone.high), float(break_row["high"]), float(row["high"])) + buffer, 2)
-            risk = sl - entry
+        original_sl = sl
+        sl = self._reduced_zone_sl(setup, direction, zone, entry, buffer, sl)
+        risk = entry - sl if direction == "CE" else sl - entry
         if risk <= 0:
             return None, "Invalid smart-zone SL", {"zone": zone.to_dict(), "entry_model": entry_model}
         if risk > self.cfg.max_entry_sl_points:
@@ -604,12 +613,50 @@ class SmartTradeEngine:
                 "entry_model": entry_model,
             }
 
+        forward_space_reason = self._forward_space_filter_reason(setup, zone)
+        if forward_space_reason:
+            risk_reward_space = (zone.enhancers or {}).get("risk_reward_space") if isinstance(zone.enhancers, dict) else None
+            return None, forward_space_reason, {
+                "zone": zone.to_dict(),
+                "risk_reward_space": risk_reward_space,
+                "required_space_width_ratio": round(float(getattr(self.cfg, "smart_trade_min_forward_space_width_ratio", 0.0) or 0.0), 2),
+                "entry_model": entry_model,
+            }
+
         candles = day_rows.set_index("datetime").sort_index()
         disp = self.displacement.analyze(candles, row_index)
         structure = self.structure.structure_shift(candles, row_index)
         fvg_context = self.fvg.context(candles, row_index, direction)
         pd_context = self.premium_discount.context(levels, entry)
         expected = "bullish" if direction == "CE" else "bearish"
+        counter_pd = (direction == "CE" and pd_context.get("zone") == "premium") or (direction == "PE" and pd_context.get("zone") == "discount")
+        has_directional_structure = bool(structure.get("direction") == expected and structure.get("is_structure_break"))
+        has_unmitigated_directional_fvg = bool(
+            fvg_context.get("present")
+            and not fvg_context.get("fully_mitigated")
+            and fvg_context.get("direction") == expected
+        )
+        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}:
+            if counter_pd:
+                return None, "Premium/discount context is against this smart-zone reaction", {
+                    "zone": zone.to_dict(),
+                    "entry_model": entry_model,
+                    "premium_discount": pd_context,
+                }
+            if not (has_directional_structure or has_unmitigated_directional_fvg):
+                return None, "Reaction lacks structure shift or unmitigated directional FVG", {
+                    "zone": zone.to_dict(),
+                    "entry_model": entry_model,
+                    "structure_shift": structure,
+                    "fair_value_gap": fvg_context,
+                }
+        if setup == "SMART_ZONE_BREAK_CONFIRMATION" and counter_pd and not has_directional_structure:
+            return None, "Counter-PD zone break needs structure confirmation", {
+                "zone": zone.to_dict(),
+                "entry_model": entry_model,
+                "premium_discount": pd_context,
+                "structure_shift": structure,
+            }
         if (
             setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}
             and structure.get("is_structure_break")
@@ -623,8 +670,13 @@ class SmartTradeEngine:
         score = self._score(setup, direction, row, zone, disp, structure, fvg_context, pd_context, htf_context, rr, risk, atr)
         if score < self.cfg.min_setup_score:
             return None, f"Smart-zone setup score below {self.cfg.min_setup_score}", {"zone": zone.to_dict(), "score": score, "entry_model": entry_model}
-        if setup == "SMART_ZONE_FLIP_RETEST_CONFIRMATION" and not pd_context.get("valid"):
-            return None, "Premium/discount context unavailable for flip-retest trade", {"zone": zone.to_dict(), "score": score, "entry_model": entry_model, "premium_discount": pd_context}
+        if setup == "SMART_ZONE_RETEST_CONFIRMATION" and score < int(getattr(self.cfg, "smart_trade_retest_min_score", self.cfg.min_setup_score) or self.cfg.min_setup_score):
+            return None, "Smart-zone retest setup score below retest threshold", {
+                "zone": zone.to_dict(),
+                "score": score,
+                "required_score": int(getattr(self.cfg, "smart_trade_retest_min_score", self.cfg.min_setup_score) or self.cfg.min_setup_score),
+                "entry_model": entry_model,
+            }
         pd_reason = self._counter_pd_rejection_reason(direction, setup, score, zone, pd_context)
         if pd_reason:
             return None, pd_reason, {"zone": zone.to_dict(), "score": score, "entry_model": entry_model, "premium_discount": pd_context}
@@ -641,9 +693,11 @@ class SmartTradeEngine:
             "time": row["time"],
             "entry_price": entry,
             "SL_price": sl,
+            "original_SL_price": original_sl,
             "target_price": round(float(target["price"]), 2),
             "RR": round(rr, 2),
             "entry_model": entry_model,
+            "smart_zone_sl_model": "zone_inner_fraction" if sl != original_sl else "structural_extreme",
             "smart_trade_grade": self._grade(score),
             "smart_zone": zone.to_dict(),
             "smart_zone_score": zone.score,
@@ -775,6 +829,26 @@ class SmartTradeEngine:
             )
         return out
 
+    def _reduced_zone_sl(self, setup: str, direction: str, zone: SmartZone, entry: float, buffer: float, structural_sl: float) -> float:
+        if setup not in {"SMART_ZONE_BREAK_CONFIRMATION", "SMART_ZONE_RETEST_CONFIRMATION"}:
+            return structural_sl
+        fraction = float(getattr(self.cfg, "smart_trade_sl_zone_inner_fraction", 0.0) or 0.0)
+        if fraction <= 0:
+            return structural_sl
+        fraction = min(max(fraction, 0.0), 0.5)
+        zone_width = max(float(zone.high) - float(zone.low), 0.0)
+        if zone_width <= 0:
+            return structural_sl
+        if direction == "CE":
+            candidate = round(float(zone.low) + (zone_width * fraction) - buffer, 2)
+            if candidate >= entry:
+                return structural_sl
+            return max(float(structural_sl), candidate)
+        candidate = round(float(zone.high) - (zone_width * fraction) + buffer, 2)
+        if candidate <= entry:
+            return structural_sl
+        return min(float(structural_sl), candidate)
+
     def _score(
         self,
         setup: str,
@@ -799,14 +873,8 @@ class SmartTradeEngine:
             score += 8
         if setup == "SMART_ZONE_RETEST_CONFIRMATION":
             score += self.cfg.smart_trade_retest_score_bonus
-        if setup == "SMART_ZONE_FLIP_RETEST_CONFIRMATION":
-            score += self.cfg.smart_trade_retest_score_bonus + 4
         if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}:
             score += 6
-        if setup == "SMART_ZONE_REJECTION_OVERRIDE":
-            score += self.cfg.smart_trade_retest_score_bonus + 10
-        if setup == "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT":
-            score += 12
         if row["close"] > row["open"] if direction == "CE" else row["close"] < row["open"]:
             score += 8
         if disp.get("direction") == expected:
@@ -854,11 +922,8 @@ class SmartTradeEngine:
         if setup not in {
             "SMART_ZONE_BREAK_CONFIRMATION",
             "SMART_ZONE_RETEST_CONFIRMATION",
-            "SMART_ZONE_FLIP_RETEST_CONFIRMATION",
             "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION",
             "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-            "SMART_ZONE_REJECTION_OVERRIDE",
-            "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT",
         }:
             return False
         return (
@@ -878,8 +943,6 @@ class SmartTradeEngine:
         counter_context = (direction == "CE" and zone_name == "premium") or (direction == "PE" and zone_name == "discount")
         if not counter_context:
             return None
-        if setup in {"SMART_ZONE_REJECTION_OVERRIDE", "SMART_ZONE_FLIP_RETEST_CONFIRMATION"}:
-            return "Premium/discount context is against this smart-zone trade"
         if (
             score >= int(self.cfg.smart_trade_counter_pd_min_score)
             and float(zone.score) >= float(self.cfg.smart_trade_counter_pd_min_zone_score)
@@ -902,13 +965,32 @@ class SmartTradeEngine:
             return None
         return "Temporary freshness filter blocked smart-zone setup"
 
+    def _forward_space_filter_reason(self, setup: str, zone: SmartZone) -> str | None:
+        if setup not in {"SMART_ZONE_BREAK_CONFIRMATION", "SMART_ZONE_RETEST_CONFIRMATION"}:
+            return None
+        required = float(getattr(self.cfg, "smart_trade_min_forward_space_width_ratio", 0.0) or 0.0)
+        if required <= 0:
+            return None
+        enhancers = zone.enhancers or {}
+        risk_reward_space = enhancers.get("risk_reward_space") if isinstance(enhancers, dict) else None
+        if not isinstance(risk_reward_space, dict):
+            return None
+        ratio = risk_reward_space.get("space_width_ratio")
+        if ratio is None:
+            return None
+        try:
+            ratio_value = float(ratio)
+        except (TypeError, ValueError):
+            return None
+        if ratio_value >= required:
+            return None
+        return "Forward space to opposing zone is too compressed"
+
     @staticmethod
     def _is_one_shot_setup(setup: str) -> bool:
         return setup in {
             "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION",
             "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-            "SMART_ZONE_REJECTION_OVERRIDE",
-            "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT",
         }
 
     @staticmethod
@@ -1005,7 +1087,8 @@ class SmartTradeEngine:
         if history.empty:
             snapshot = ([], 0.0)
         else:
-            zones = self._known_zones(history, float(history.iloc[-1]["close"]), as_of)
+            trading_date = day_rows.iloc[0]["date"] if not day_rows.empty else None
+            zones = self._known_zones(all_rows, float(history.iloc[-1]["close"]), as_of, trading_date)
             snapshot = (zones, self._latest_atr(history))
         self._snapshot_cache[as_of] = snapshot
         return snapshot
@@ -1021,8 +1104,12 @@ class SmartTradeEngine:
         as_of = pd.to_datetime(timestamp)
         history = rows[rows["datetime"] < as_of]
         days = int(getattr(self.cfg, "smart_trade_zone_history_days", 0) or 0)
-        if days > 0:
-            history = history[history["datetime"] >= as_of - pd.Timedelta(days=days)]
+        if days > 0 and not history.empty:
+            current_date = as_of.date()
+            previous_dates = sorted({day for day in history["date"].unique() if day < current_date})
+            keep_dates = set(previous_dates[-days:])
+            keep_dates.add(current_date)
+            history = history[history["date"].isin(keep_dates)]
         return history
 
     @staticmethod

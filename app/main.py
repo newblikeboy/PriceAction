@@ -33,6 +33,7 @@ from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_mark
 from app.options_pricing import select_option_contract, to_float, to_int
 from app.paper_trading import PaperTradeEngine
 from app.replay import ReplayBarSession
+from app.zone_detection import ZoneDetectionSession
 from app.services import StrategyService
 from app.storage.database import Database
 
@@ -51,13 +52,16 @@ _backtest_job_lock = threading.Lock()
 _backtest_job: dict[str, Any] = {}
 _replay_lock = threading.RLock()
 _replay_sessions: dict[str, ReplayBarSession] = {}
+_zone_detection_lock = threading.RLock()
+_zone_detection_sessions: dict[str, ZoneDetectionSession] = {}
 IST = ZoneInfo("Asia/Kolkata")
 FYERS_NIFTY_INDEX = "NSE:NIFTY50-INDEX"
 _chart_cache_lock = threading.Lock()
 _chart_cache: dict[tuple[str, str, int], dict[str, Any]] = {}
-CHART_CACHE_TTL_SECONDS = 120
+CHART_CACHE_TTL_SECONDS = 600
 _chart_warm_lock = threading.Lock()
 _chart_warm_running = False
+_chart_compute_lock = threading.Lock()
 _runtime_cache_lock = threading.Lock()
 _runtime_cache: dict[str, tuple[float, Any]] = {}
 _live_socket_lock = threading.Lock()
@@ -132,7 +136,13 @@ class ReplayLoadPayload(BaseModel):
     start_date: str
     end_date: str
     warmup_candles: int = 30
-    context_trading_days: int = 4
+    context_trading_days: int = 2
+
+
+class ZoneDetectionLoadPayload(BaseModel):
+    symbol: str = "NIFTY"
+    start_date: str
+    end_date: str
 
 
 class ReplayStepPayload(BaseModel):
@@ -1790,23 +1800,31 @@ def zones_near_underlying(zones: list[dict[str, Any]], underlying: float | None,
 
 def smart_zone_chart_zones(candles_5m, current_price: float | None = None) -> list[dict[str, Any]]:
     result = LevelEngine().calculate_smart_zones(candles_5m, current_price=current_price)
+    today_date = candles_5m["date"].max() if not candles_5m.empty else None
+    all_zones = result.strongest_zones[:15]
+    price = current_price or (float(candles_5m.iloc[-1]["close"]) if not candles_5m.empty else 0.0)
+    zones_by_distance = sorted(all_zones, key=lambda z: abs(float(z.midpoint) - price))
+    focus_ids = {z.zone_id for z in zones_by_distance[:5] if float(z.score) >= 70}
     out: list[dict[str, Any]] = []
-    for zone in result.strongest_zones[:10]:
-        color = "#16a34a" if any(tag in zone.zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows")) else "#dc2626"
+    for zone in all_zones:
+        color = "#16a34a" if any(tag in zone.zone_type for tag in ("demand", "swing_low", "breakout", "gap_up", "equal_lows", "bullish")) else "#dc2626"
         label = zone.zone_type.upper().replace("_", " ")
-        out.append(
-            {
-                "zone_id": zone.zone_id,
-                "name": label,
-                "zone_type": zone.zone_type,
-                "low": round(float(zone.low), 2),
-                "high": round(float(zone.high), 2),
-                "midpoint": round(float(zone.midpoint), 2),
-                "score": zone.score,
-                "status": zone.status,
-                "color": color,
-            }
-        )
+        created_date = pd.to_datetime(zone.created_at).date() if zone.created_at else None
+        is_anchor = today_date is not None and created_date is not None and created_date < today_date
+        out.append({
+            "zone_id": zone.zone_id,
+            "name": label,
+            "zone_type": zone.zone_type,
+            "low": round(float(zone.low), 2),
+            "high": round(float(zone.high), 2),
+            "midpoint": round(float(zone.midpoint), 2),
+            "score": zone.score,
+            "status": zone.status,
+            "color": color,
+            "formed_at": None if is_anchor else str(zone.created_at),
+            "is_anchor": is_anchor,
+            "is_focus": zone.zone_id in focus_ids,
+        })
     return out
 
 
@@ -1828,70 +1846,85 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
             payload["cache"] = {"hit": True, "ttl_seconds": CHART_CACHE_TTL_SECONDS}
             return payload
 
-    end = datetime.now(IST).date()
-    start = end - timedelta(days=days - 1)
-    db = get_db()
-    chart_rows = db.load_chart_candles(timeframe, symbol=symbol, start_date=start.isoformat(), end_date=end.isoformat())
-    candles = candle_payload(chart_rows)
-    price_range = candle_price_range(candles)
-    trades = db.list_trades_between(start.isoformat(), end.isoformat(), symbol=symbol, limit=1000)
-    markers = trade_markers(trades)
-    levels = []
-    zones = []
-    latest_ai: dict[str, Any] = {"date": None, "signals": 0, "skipped": 0, "message": "No candle data"}
-
-    try:
-        if chart_rows:
-            latest_date = chart_rows[-1]["datetime"].date()
-            ai_start = (latest_date - timedelta(days=10)).isoformat()
-            candles_5m = db.load_candles("5m", symbol=symbol, start_date=ai_start, end_date=str(latest_date))
-            if not candles_5m.empty:
-                level_set = LevelEngine().calculate(candles_5m, latest_date)
-                day_signals, day_skipped = SignalEngine().generate_for_day(candles_5m, level_set, latest_date)
-                markers.extend(signal_markers(day_signals))
-                markers.extend(skipped_markers([item.to_dict() for item in day_skipped]))
-                latest_close = candle_close(candles[-1]) if candles else None
-                levels = level_payload(level_set, latest_close, price_range=price_range, relevance_points=1000.0)
-                zones = smart_zone_chart_zones(candles_5m, latest_close)
-                latest_ai = {
-                    "date": str(latest_date),
-                    "signals": len(day_signals),
-                    "skipped": len(day_skipped),
-                    "message": "Current loaded trading day evaluated",
+    with _chart_compute_lock:
+        # Re-check cache after acquiring compute lock — another thread may have computed while we waited
+        now = time.monotonic()
+        with _chart_cache_lock:
+            cached = _chart_cache.get(cache_key)
+            if cached and now - float(cached["stored_at"]) <= CHART_CACHE_TTL_SECONDS:
+                base = cached["payload"]
+                payload = {
+                    **base,
+                    "levels": list(base["levels"]),
+                    "zones": list(base.get("zones") or []),
+                    "counts": dict(base["counts"]),
+                    "latest_ai": dict(base["latest_ai"]),
+                    "price_range": dict(base["price_range"]) if base.get("price_range") else None,
                 }
-    except Exception as exc:
-        latest_ai = {"date": None, "signals": 0, "skipped": 0, "message": str(exc)}
+                payload["cache"] = {"hit": True, "ttl_seconds": CHART_CACHE_TTL_SECONDS}
+                return payload
 
-    raw_marker_count = len(markers)
-    markers = sorted(visible_markers(markers, candles), key=lambda item: int(item["time"]))
-    payload = {
-        "symbol": symbol,
-        "source_symbol": FYERS_NIFTY_INDEX,
-        "timeframe": timeframe,
-        "days": days,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "candles": candles,
-        "markers": markers,
-        "levels": levels,
-        "zones": zones,
-        "price_range": price_range,
-        "latest_ai": latest_ai,
-        "counts": {
-            "candles": len(candles),
-            "markers": len(markers),
-            "raw_markers": raw_marker_count,
-            "levels": len(levels),
-            "zones": len(zones),
-        },
-        "cache": {"hit": False, "ttl_seconds": CHART_CACHE_TTL_SECONDS},
-    }
-    with _chart_cache_lock:
-        _chart_cache[cache_key] = {"stored_at": now, "payload": deepcopy(payload)}
-    return payload
+        end = datetime.now(IST).date()
+        start = end - timedelta(days=days - 1)
+        db = get_db()
+        chart_rows = db.load_chart_candles(timeframe, symbol=symbol, start_date=start.isoformat(), end_date=end.isoformat())
+        candles = candle_payload(chart_rows)
+        price_range = candle_price_range(candles)
+        trades = db.list_trades_between(start.isoformat(), end.isoformat(), symbol=symbol, limit=1000)
+        markers = trade_markers(trades)
+        levels = []
+        zones = []
+        latest_ai: dict[str, Any] = {"date": None, "signals": 0, "skipped": 0, "message": "No candle data"}
+
+        try:
+            if chart_rows:
+                latest_date = chart_rows[-1]["datetime"].date()
+                ai_start = (latest_date - timedelta(days=5)).isoformat()
+                candles_5m = db.load_candles("5m", symbol=symbol, start_date=ai_start, end_date=str(latest_date))
+                if not candles_5m.empty:
+                    latest_close = candle_close(candles[-1]) if candles else None
+                    level_set = LevelEngine().calculate(candles_5m, latest_date)
+                    levels = level_payload(level_set, latest_close, price_range=price_range, relevance_points=1000.0)
+                    zones = smart_zone_chart_zones(candles_5m, latest_close)
+                    latest_ai = {
+                        "date": str(latest_date),
+                        "signals": 0,
+                        "skipped": 0,
+                        "message": "Zones and levels loaded",
+                    }
+        except Exception as exc:
+            latest_ai = {"date": None, "signals": 0, "skipped": 0, "message": str(exc)}
+
+        raw_marker_count = len(markers)
+        markers = sorted(visible_markers(markers, candles), key=lambda item: int(item["time"]))
+        payload = {
+            "symbol": symbol,
+            "source_symbol": FYERS_NIFTY_INDEX,
+            "timeframe": timeframe,
+            "days": days,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "candles": candles,
+            "markers": markers,
+            "levels": levels,
+            "zones": zones,
+            "price_range": price_range,
+            "latest_ai": latest_ai,
+            "counts": {
+                "candles": len(candles),
+                "markers": len(markers),
+                "raw_markers": raw_marker_count,
+                "levels": len(levels),
+                "zones": len(zones),
+            },
+            "cache": {"hit": False, "ttl_seconds": CHART_CACHE_TTL_SECONDS},
+        }
+        with _chart_cache_lock:
+            _chart_cache[cache_key] = {"stored_at": now, "payload": deepcopy(payload)}
+        return payload
 
 
-def warm_admin_chart_cache(symbol: str = "NIFTY", days: int = 90) -> None:
+def warm_admin_chart_cache(symbol: str = "NIFTY", days: int = 30) -> None:
     global _chart_warm_running
     with _chart_warm_lock:
         if _chart_warm_running:
@@ -2346,7 +2379,7 @@ def api_admin_replay_load(payload: ReplayLoadPayload, user: dict[str, Any] = Dep
         selected_candles = get_db().load_candles("5m", symbol=symbol, start_date=start_date, end_date=end_date)
         if selected_candles.empty:
             raise HTTPException(status_code=404, detail="No 5m candles found for selected replay dates")
-        context_days = max(0, min(int(payload.context_trading_days or 4), 20))
+        context_days = max(0, min(int(payload.context_trading_days or 2), 20))
         context_start_date = (pd.to_datetime(start_date).date() - timedelta(days=max(context_days * 4, 14))).isoformat()
         candles = get_db().load_candles("5m", symbol=symbol, start_date=context_start_date, end_date=end_date)
         if candles.empty:
@@ -2402,6 +2435,78 @@ def api_admin_replay_reset(user: dict[str, Any] = Depends(require_admin)) -> dic
             return get_replay_session_for_user(user).reset()
     except Exception as exc:
         raise replay_error(exc) from exc
+
+
+def _zone_detection_session_key(user: dict[str, Any]) -> str:
+    return str(user.get("username") or "admin")
+
+
+def _get_zone_detection_session(user: dict[str, Any]) -> ZoneDetectionSession:
+    key = _zone_detection_session_key(user)
+    with _zone_detection_lock:
+        session = _zone_detection_sessions.get(key)
+    if session is None:
+        raise HTTPException(status_code=404, detail="No zone detection session loaded. Select dates and create zones first.")
+    return session
+
+
+def _zone_detection_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
+    logger.exception("Zone detection request failed")
+    return HTTPException(status_code=500, detail=f"Zone detection failed: {exc}")
+
+
+@app.post("/api/admin/zone-detection/load")
+def api_zone_detection_load(payload: ZoneDetectionLoadPayload, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        symbol = payload.symbol.strip() or "NIFTY"
+        start_date = pd.to_datetime(payload.start_date).date().isoformat()
+        end_date = pd.to_datetime(payload.end_date).date().isoformat()
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="Start date must be before or equal to end date")
+        candles = get_db().load_candles("5m", symbol=symbol, start_date=start_date, end_date=end_date)
+        if candles.empty:
+            raise HTTPException(status_code=404, detail="No 5m candles found for selected dates")
+        session = ZoneDetectionSession(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            candles_5m=candles,
+            cfg=config,
+        )
+        with _zone_detection_lock:
+            _zone_detection_sessions[_zone_detection_session_key(user)] = session
+        return session.payload(initial_load=True)
+    except Exception as exc:
+        raise _zone_detection_error(exc) from exc
+
+
+@app.post("/api/admin/zone-detection/next")
+def api_zone_detection_next(payload: ReplayStepPayload, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _zone_detection_lock:
+            return _get_zone_detection_session(user).next(count=max(1, min(int(payload.count or 1), 100)))
+    except Exception as exc:
+        raise _zone_detection_error(exc) from exc
+
+
+@app.post("/api/admin/zone-detection/previous")
+def api_zone_detection_previous(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _zone_detection_lock:
+            return _get_zone_detection_session(user).previous()
+    except Exception as exc:
+        raise _zone_detection_error(exc) from exc
+
+
+@app.post("/api/admin/zone-detection/reset")
+def api_zone_detection_reset(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        with _zone_detection_lock:
+            return _get_zone_detection_session(user).reset()
+    except Exception as exc:
+        raise _zone_detection_error(exc) from exc
 
 
 @app.get("/api/admin/live-trades/monitor", dependencies=[Depends(require_admin)])
