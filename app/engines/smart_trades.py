@@ -677,18 +677,6 @@ class SmartTradeEngine:
                 "required_score": int(getattr(self.cfg, "smart_trade_retest_min_score", self.cfg.min_setup_score) or self.cfg.min_setup_score),
                 "entry_model": entry_model,
             }
-        quality_reason = self._quality_gate_reason(setup, row, direction, zone, structure, fvg_context, rr, risk)
-        if quality_reason:
-            return None, quality_reason, {
-                "zone": zone.to_dict(),
-                "score": score,
-                "risk_points": round(risk, 2),
-                "risk_reward": round(rr, 2),
-                "entry_model": entry_model,
-                "structure_shift": structure,
-                "fair_value_gap": fvg_context,
-                "min_validation_touches": int(getattr(self.cfg, "smart_trade_min_validation_touches", 2) or 2),
-            }
         pd_reason = self._counter_pd_rejection_reason(direction, setup, score, zone, pd_context)
         if pd_reason:
             return None, pd_reason, {"zone": zone.to_dict(), "score": score, "entry_model": entry_model, "premium_discount": pd_context}
@@ -942,45 +930,6 @@ class SmartTradeEngine:
             score >= int(self.cfg.smart_trade_htf_override_min_score)
             and float(zone.score) >= float(self.cfg.smart_trade_htf_override_min_zone_score)
         )
-
-    def _quality_gate_reason(
-        self,
-        setup: str,
-        row: pd.Series,
-        direction: str,
-        zone: SmartZone,
-        structure: dict[str, Any],
-        fvg_context: dict[str, Any],
-        rr: float,
-        risk: float,
-    ) -> str | None:
-        if not bool(getattr(self.cfg, "smart_trade_quality_gate_enabled", True)):
-            return None
-
-        expected = "bullish" if direction == "CE" else "bearish"
-        has_bos = bool(structure.get("is_bos") and structure.get("direction") == expected)
-        has_directional_fvg = bool(
-            fvg_context.get("present")
-            and not fvg_context.get("fully_mitigated")
-            and fvg_context.get("direction") == expected
-        )
-        touch_count = int(getattr(zone, "touch_count", 0) or 0)
-        min_touches = max(int(getattr(self.cfg, "smart_trade_min_validation_touches", 2) or 2), 1)
-
-        if not has_bos and touch_count < min_touches:
-            return "Unproven smart zone needs BOS or repeated touch validation"
-
-        high_risk_points = float(getattr(self.cfg, "smart_trade_high_risk_points", 0.0) or 0.0)
-        high_risk_min_rr = float(getattr(self.cfg, "smart_trade_high_risk_min_rr", 0.0) or 0.0)
-        if high_risk_points > 0 and risk > high_risk_points and rr < high_risk_min_rr and not has_bos:
-            return "High-risk smart-zone trade needs BOS or stronger RR"
-
-        late_start = str(getattr(self.cfg, "smart_trade_late_quality_start", "") or "")
-        late_min_rr = float(getattr(self.cfg, "smart_trade_late_min_rr_without_bos", 0.0) or 0.0)
-        if late_start and str(row["time"]) >= late_start and not has_bos and rr < late_min_rr and not has_directional_fvg:
-            return "Late-session smart-zone trade needs BOS, FVG, or stronger RR"
-
-        return None
 
     def _counter_pd_rejection_reason(
         self,

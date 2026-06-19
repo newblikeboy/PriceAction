@@ -50,53 +50,6 @@ def test_temporary_freshness_filter_is_enabled_by_default() -> None:
     assert "SMART_ZONE_REJECTION_OVERRIDE" not in cfg.smart_temp_freshness_filter_setups
 
 
-def test_smart_trade_quality_gate_is_enabled_by_default() -> None:
-    cfg = StrategyConfig()
-
-    assert cfg.smart_trade_quality_gate_enabled is True
-    assert cfg.smart_trade_min_validation_touches == 2
-    assert cfg.smart_trade_high_risk_points == 54.0
-    assert cfg.smart_trade_high_risk_min_rr == 2.5
-
-
-def test_smart_trade_quality_gate_blocks_unproven_zone_without_bos() -> None:
-    engine = SmartTradeEngine(StrategyConfig())
-    zone = _zone("swing_high", 100, 120, score=90)
-    zone.touch_count = 1
-
-    reason = engine._quality_gate_reason(
-        "SMART_ZONE_BREAK_CONFIRMATION",
-        pd.Series({"time": "10:30"}),
-        "CE",
-        zone,
-        {"is_bos": False, "direction": "bullish"},
-        {"present": True, "fully_mitigated": False, "direction": "bullish"},
-        rr=3.0,
-        risk=30.0,
-    )
-
-    assert reason == "Unproven smart zone needs BOS or repeated touch validation"
-
-
-def test_smart_trade_quality_gate_allows_validated_zone_without_bos() -> None:
-    engine = SmartTradeEngine(StrategyConfig())
-    zone = _zone("swing_high", 100, 120, score=90)
-    zone.touch_count = 2
-
-    reason = engine._quality_gate_reason(
-        "SMART_ZONE_BREAK_CONFIRMATION",
-        pd.Series({"time": "10:30"}),
-        "CE",
-        zone,
-        {"is_bos": False, "direction": "bullish"},
-        {"present": True, "fully_mitigated": False, "direction": "bullish"},
-        rr=3.0,
-        risk=30.0,
-    )
-
-    assert reason is None
-
-
 def test_temporary_freshness_filter_blocks_only_configured_setups() -> None:
     engine = SmartTradeEngine(_test_config())
     zone = _zone("swing_high", 100, 120, score=90)
@@ -350,7 +303,6 @@ def _test_config() -> StrategyConfig:
         smart_trade_sl_atr_buffer=0.0,
         htf_bias_filter_enabled=True,
         htf_bias_allow_neutral=True,
-        smart_trade_quality_gate_enabled=False,
     )
 
 
