@@ -170,6 +170,12 @@ class StrategyConfig:
     smart_trade_counter_pd_min_zone_score: float = 78.0
     smart_trade_reaction_requires_hold: bool = False
     smart_trade_min_forward_space_width_ratio: float = 0.10
+    smart_trade_quality_gate_enabled: bool = True
+    smart_trade_min_validation_touches: int = 2
+    smart_trade_high_risk_points: float = 54.0
+    smart_trade_high_risk_min_rr: float = 2.5
+    smart_trade_late_quality_start: str = "13:05"
+    smart_trade_late_min_rr_without_bos: float = 2.5
     # TEMP strong-zone experiment: remove these three fields and the matching TEMP checks in levels.py to revert.
     smart_temp_strong_move_zone_enabled: bool = False
     smart_temp_strong_move_points: float = 100.0

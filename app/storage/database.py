@@ -66,6 +66,7 @@ class Database:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                self._ensure_user_broker_columns(cursor)
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS paper_trades (
@@ -149,6 +150,51 @@ class Database:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS angel_order_api_hits (
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+                        username VARCHAR(191) NOT NULL,
+                        paper_trade_id BIGINT UNSIGNED,
+                        action VARCHAR(32) NOT NULL,
+                        symbol VARCHAR(128),
+                        request_json JSON,
+                        response_json JSON,
+                        http_status INT,
+                        ok TINYINT(1) NOT NULL DEFAULT 0,
+                        error_message TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_angel_hit_user (username),
+                        INDEX idx_angel_hit_trade (paper_trade_id),
+                        INDEX idx_angel_hit_created (created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS angel_live_orders (
+                        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+                        username VARCHAR(191) NOT NULL,
+                        paper_trade_id BIGINT UNSIGNED NOT NULL,
+                        symbol VARCHAR(128) NOT NULL,
+                        token VARCHAR(64) NOT NULL,
+                        exchange VARCHAR(16) NOT NULL,
+                        quantity INT NOT NULL,
+                        entry_side VARCHAR(8) NOT NULL,
+                        entry_order_id VARCHAR(96),
+                        exit_order_id VARCHAR(96),
+                        status ENUM('OPEN', 'CLOSED', 'FAILED') NOT NULL DEFAULT 'OPEN',
+                        entry_response_json JSON,
+                        exit_response_json JSON,
+                        close_reason VARCHAR(64),
+                        opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        closed_at TIMESTAMP NULL,
+                        UNIQUE KEY uq_angel_order_user_trade (username, paper_trade_id),
+                        INDEX idx_angel_order_trade (paper_trade_id),
+                        INDEX idx_angel_order_status (status)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
                 for timeframe in ("5m",):
                     table = self.candle_table(timeframe)
                     cursor.execute(
@@ -171,6 +217,27 @@ class Database:
                     )
         if not self.get_user("admin"):
             self.create_user("admin", "admin123", "admin")
+
+    def _ensure_user_broker_columns(self, cursor: Any) -> None:
+        cursor.execute("SHOW COLUMNS FROM users")
+        existing = {str(row.get("Field") or "") for row in cursor.fetchall()}
+        columns = {
+            "angel_one_client_id": "VARCHAR(64)",
+            "angel_one_api_key": "VARCHAR(128)",
+            "angel_one_pin": "VARCHAR(64)",
+            "angel_one_totp_secret": "TEXT",
+            "angel_one_connected": "TINYINT(1) NOT NULL DEFAULT 0",
+            "angel_one_access_token": "TEXT",
+            "angel_one_feed_token": "TEXT",
+            "angel_one_refresh_token": "TEXT",
+            "angel_one_token_expires_at": "BIGINT",
+            "angel_one_exchanged_at": "BIGINT",
+            "angel_trading_enabled": "TINYINT(1) NOT NULL DEFAULT 0",
+            "angel_lot_count": "INT NOT NULL DEFAULT 1",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
     def _ensure_paper_trade_option_columns(self, cursor: Any) -> None:
         cursor.execute("SHOW COLUMNS FROM paper_trades")
@@ -221,6 +288,274 @@ class Database:
         if user and self.verify_password(password, user["password_hash"]):
             return user
         return None
+
+    @staticmethod
+    def _masked(value: Any, visible: int = 4) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= visible:
+            return "*" * len(text)
+        return f"{'*' * max(0, len(text) - visible)}{text[-visible:]}"
+
+    def broker_config(self, username: str) -> dict[str, Any]:
+        user = self.get_user(username) or {}
+        return {
+            "client_id": user.get("angel_one_client_id") or "",
+            "api_key_masked": self._masked(user.get("angel_one_api_key")),
+            "pin_saved": bool(user.get("angel_one_pin")),
+            "totp_saved": bool(user.get("angel_one_totp_secret")),
+            "connected": bool(user.get("angel_one_connected")),
+            "has_access_token": bool(user.get("angel_one_access_token")),
+            "token_expires_at": user.get("angel_one_token_expires_at"),
+            "token_exchanged_at": user.get("angel_one_exchanged_at"),
+            "trading_enabled": bool(user.get("angel_trading_enabled")),
+            "lot_count": int(user.get("angel_lot_count") or 1),
+        }
+
+    def get_user_angel_session(self, username: str) -> dict[str, Any] | None:
+        user = self.get_user(username)
+        if not user:
+            return None
+        return {
+            "username": user.get("username"),
+            "client_id": user.get("angel_one_client_id") or "",
+            "api_key": user.get("angel_one_api_key") or "",
+            "pin": user.get("angel_one_pin") or "",
+            "totp_secret": user.get("angel_one_totp_secret") or "",
+            "access_token": user.get("angel_one_access_token") or "",
+            "refresh_token": user.get("angel_one_refresh_token") or "",
+            "feed_token": user.get("angel_one_feed_token") or "",
+            "connected": bool(user.get("angel_one_connected")),
+            "trading_enabled": bool(user.get("angel_trading_enabled")),
+            "lot_count": int(user.get("angel_lot_count") or 1),
+        }
+
+    def set_user_broker_profile(
+        self,
+        username: str,
+        *,
+        client_id: str,
+        api_key: str | None = None,
+        pin: str | None = None,
+        totp_secret: str | None = None,
+        trading_enabled: bool = False,
+        lot_count: int = 1,
+    ) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET angel_one_client_id = %s,
+                        angel_one_api_key = COALESCE(NULLIF(%s, ''), angel_one_api_key),
+                        angel_one_pin = COALESCE(NULLIF(%s, ''), angel_one_pin),
+                        angel_one_totp_secret = COALESCE(NULLIF(%s, ''), angel_one_totp_secret),
+                        angel_trading_enabled = %s,
+                        angel_lot_count = %s
+                    WHERE username = %s
+                    """,
+                    (
+                        client_id.strip(),
+                        (api_key or "").strip(),
+                        (pin or "").strip(),
+                        (totp_secret or "").strip().replace(" ", ""),
+                        1 if trading_enabled else 0,
+                        max(1, int(lot_count or 1)),
+                        username,
+                    ),
+                )
+
+    def save_user_angel_session(
+        self,
+        username: str,
+        *,
+        access_token: str,
+        feed_token: str | None = None,
+        refresh_token: str | None = None,
+        token_expires_at: int | None = None,
+    ) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET angel_one_connected = 1,
+                        angel_one_access_token = %s,
+                        angel_one_feed_token = %s,
+                        angel_one_refresh_token = %s,
+                        angel_one_token_expires_at = %s,
+                        angel_one_exchanged_at = %s
+                    WHERE username = %s
+                    """,
+                    (
+                        access_token,
+                        feed_token,
+                        refresh_token,
+                        token_expires_at,
+                        int(datetime.utcnow().timestamp()),
+                        username,
+                    ),
+                )
+
+    def clear_user_angel_session(self, username: str) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET angel_one_connected = 0,
+                        angel_one_access_token = NULL,
+                        angel_one_feed_token = NULL,
+                        angel_one_refresh_token = NULL,
+                        angel_one_token_expires_at = NULL,
+                        angel_one_exchanged_at = NULL
+                    WHERE username = %s
+                    """,
+                    (username,),
+                )
+
+    def list_connected_angel_sessions(self, limit: int = 5000) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT username,
+                           angel_one_client_id AS client_id,
+                           angel_one_api_key AS api_key,
+                           angel_one_access_token AS access_token,
+                           angel_one_feed_token AS feed_token,
+                           angel_one_refresh_token AS refresh_token,
+                           angel_lot_count AS lot_count
+                    FROM users
+                    WHERE angel_one_connected = 1
+                      AND angel_trading_enabled = 1
+                      AND COALESCE(angel_one_access_token, '') <> ''
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                return list(cursor.fetchall())
+
+    def save_angel_api_hit(
+        self,
+        *,
+        username: str,
+        action: str,
+        paper_trade_id: int | None = None,
+        symbol: str | None = None,
+        request_payload: dict[str, Any] | None = None,
+        response_payload: dict[str, Any] | None = None,
+        http_status: int | None = None,
+        ok: bool = False,
+        error_message: str | None = None,
+    ) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO angel_order_api_hits (
+                        username, paper_trade_id, action, symbol, request_json,
+                        response_json, http_status, ok, error_message
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        username,
+                        paper_trade_id,
+                        action,
+                        symbol,
+                        json.dumps(request_payload or {}, default=str),
+                        json.dumps(response_payload or {}, default=str),
+                        http_status,
+                        1 if ok else 0,
+                        error_message,
+                    ),
+                )
+
+    def save_angel_live_entry(
+        self,
+        *,
+        username: str,
+        paper_trade_id: int,
+        symbol: str,
+        token: str,
+        exchange: str,
+        quantity: int,
+        entry_side: str,
+        entry_order_id: str | None,
+        response_payload: dict[str, Any],
+        failed: bool = False,
+    ) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO angel_live_orders (
+                        username, paper_trade_id, symbol, token, exchange, quantity,
+                        entry_side, entry_order_id, status, entry_response_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        entry_order_id = VALUES(entry_order_id),
+                        status = VALUES(status),
+                        entry_response_json = VALUES(entry_response_json)
+                    """,
+                    (
+                        username,
+                        int(paper_trade_id),
+                        symbol,
+                        token,
+                        exchange,
+                        int(quantity),
+                        entry_side,
+                        entry_order_id,
+                        "FAILED" if failed else "OPEN",
+                        json.dumps(response_payload or {}, default=str),
+                    ),
+                )
+
+    def list_open_angel_live_orders(self, paper_trade_id: int | None = None) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                if paper_trade_id is None:
+                    cursor.execute("SELECT * FROM angel_live_orders WHERE status = 'OPEN' ORDER BY opened_at ASC")
+                else:
+                    cursor.execute(
+                        "SELECT * FROM angel_live_orders WHERE paper_trade_id = %s AND status = 'OPEN' ORDER BY opened_at ASC",
+                        (int(paper_trade_id),),
+                    )
+                return list(cursor.fetchall())
+
+    def save_angel_live_exit(
+        self,
+        *,
+        order_id: int,
+        exit_order_id: str | None,
+        close_reason: str,
+        response_payload: dict[str, Any],
+        failed: bool = False,
+    ) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE angel_live_orders
+                    SET exit_order_id = %s,
+                        close_reason = %s,
+                        exit_response_json = %s,
+                        status = %s,
+                        closed_at = CASE WHEN %s = 1 THEN closed_at ELSE CURRENT_TIMESTAMP END
+                    WHERE id = %s
+                    """,
+                    (
+                        exit_order_id,
+                        close_reason,
+                        json.dumps(response_payload or {}, default=str),
+                        "OPEN" if failed else "CLOSED",
+                        1 if failed else 0,
+                        int(order_id),
+                    ),
+                )
 
     def insert_trade(self, trade: dict[str, Any]) -> int:
         with self.connect() as db:

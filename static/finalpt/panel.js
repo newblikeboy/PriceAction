@@ -27,7 +27,25 @@
   const latestSkipped = document.getElementById("latest-skipped");
   const latestBacktestError = document.getElementById("latest-backtest-error");
   const latestBacktestTradesBody = document.getElementById("latest-backtest-trades-body");
+  const homeLiveExecutionToggle = document.getElementById("home-live-execution-toggle");
+  const brokerForm = document.getElementById("broker-form");
+  const brokerStatusChip = document.getElementById("broker-status-chip");
+  const brokerServerStatus = document.getElementById("broker-server-status");
+  const brokerSessionStatus = document.getElementById("broker-session-status");
+  const brokerApiKeyStatus = document.getElementById("broker-api-key-status");
+  const brokerLotSizeStatus = document.getElementById("broker-lot-size-status");
+  const brokerClientIdInput = document.getElementById("broker-client-id-input");
+  const brokerApiKeyInput = document.getElementById("broker-api-key-input");
+  const brokerPinInput = document.getElementById("broker-pin-input");
+  const brokerTotpInput = document.getElementById("broker-totp-input");
+  const brokerLotCountInput = document.getElementById("broker-lot-count-input");
+  const brokerTradingEnabledInput = document.getElementById("broker-trading-enabled-input");
+  const brokerSaveBtn = document.getElementById("broker-save-btn");
+  const brokerLoginBtn = document.getElementById("broker-login-btn");
+  const brokerDisconnectBtn = document.getElementById("broker-disconnect-btn");
+  const brokerMessage = document.getElementById("broker-message");
   let backtestPollTimer = null;
+  let brokerLoaded = false;
   const viewStorageKey = `priceAction.activeView.${window.location.pathname}`;
 
   function isMobile() {
@@ -157,6 +175,99 @@
     if (node) {
       node.textContent = value;
     }
+  }
+
+  function setBrokerMessage(message, isError) {
+    if (!brokerMessage) {
+      return;
+    }
+    brokerMessage.textContent = message || "";
+    brokerMessage.classList.toggle("error-text", Boolean(isError));
+  }
+
+  function setBrokerBusy(busy) {
+    [brokerSaveBtn, brokerLoginBtn, brokerDisconnectBtn].forEach(function (button) {
+      if (button) {
+        button.disabled = Boolean(busy);
+      }
+    });
+  }
+
+  function renderBrokerStatus(payload) {
+    const broker = payload && payload.broker ? payload.broker : payload || {};
+    brokerLoaded = true;
+    const serverOn = Boolean(broker.server_execution_enabled);
+    const userOn = Boolean(broker.trading_enabled);
+    const connected = Boolean(broker.connected && broker.has_access_token);
+    const fullyOn = serverOn && userOn && connected;
+    setText(brokerStatusChip, fullyOn ? "Live Ready" : connected ? "Connected" : "Not Connected");
+    setText(brokerServerStatus, serverOn ? "Enabled" : "Disabled");
+    setText(brokerSessionStatus, connected ? "Connected" : "Disconnected");
+    setText(brokerApiKeyStatus, broker.api_key_masked || "Not saved");
+    setText(brokerLotSizeStatus, String(broker.default_lot_size || "--"));
+    if (brokerClientIdInput) {
+      brokerClientIdInput.value = broker.client_id || "";
+    }
+    if (brokerLotCountInput) {
+      brokerLotCountInput.value = String(broker.lot_count || 1);
+    }
+    if (brokerTradingEnabledInput) {
+      brokerTradingEnabledInput.checked = userOn;
+    }
+    if (homeLiveExecutionToggle) {
+      homeLiveExecutionToggle.classList.toggle("is-on", fullyOn);
+      homeLiveExecutionToggle.classList.toggle("is-off", !fullyOn);
+      homeLiveExecutionToggle.textContent = fullyOn ? "On" : "Off";
+      homeLiveExecutionToggle.setAttribute("aria-checked", fullyOn ? "true" : "false");
+    }
+  }
+
+  function loadBrokerStatus(force) {
+    if (!brokerForm || (brokerLoaded && !force)) {
+      return Promise.resolve();
+    }
+    return fetch("/api/user/broker/angel-one", {
+      headers: { "Accept": "application/json", "X-Requested-With": "fetch" },
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("Broker status request failed");
+        }
+        return response.json();
+      })
+      .then(renderBrokerStatus)
+      .catch(function (error) {
+        setBrokerMessage(error.message, true);
+      });
+  }
+
+  function postBroker(url, body) {
+    setBrokerBusy(true);
+    setBrokerMessage("", false);
+    const options = {
+      method: "POST",
+      headers: { "Accept": "application/json", "X-Requested-With": "fetch" },
+    };
+    if (body) {
+      options.headers["Content-Type"] = "application/json";
+      options.body = JSON.stringify(body);
+    }
+    return fetch(url, options)
+      .then(function (response) {
+        if (!response.ok) {
+          return response.json().then(function (payload) {
+            throw new Error(payload.detail || "Broker request failed");
+          });
+        }
+        return response.json();
+      })
+      .then(function (payload) {
+        renderBrokerStatus(payload);
+        return payload;
+      })
+      .finally(function () {
+        setBrokerBusy(false);
+      });
   }
 
   function escapeHtml(value) {
@@ -303,5 +414,65 @@
     startBacktestPolling();
   }
 
+  if (brokerForm) {
+    brokerForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      postBroker("/api/user/broker/angel-one", {
+        client_id: brokerClientIdInput ? brokerClientIdInput.value.trim() : "",
+        api_key: brokerApiKeyInput ? brokerApiKeyInput.value.trim() : "",
+        pin: brokerPinInput ? brokerPinInput.value.trim() : "",
+        totp_secret: brokerTotpInput ? brokerTotpInput.value.trim() : "",
+        trading_enabled: brokerTradingEnabledInput ? brokerTradingEnabledInput.checked : false,
+        lot_count: brokerLotCountInput ? Number(brokerLotCountInput.value || 1) : 1,
+      })
+        .then(function () {
+          setBrokerMessage("Broker profile saved.", false);
+          if (brokerApiKeyInput) {
+            brokerApiKeyInput.value = "";
+          }
+          if (brokerPinInput) {
+            brokerPinInput.value = "";
+          }
+          if (brokerTotpInput) {
+            brokerTotpInput.value = "";
+          }
+        })
+        .catch(function (error) {
+          setBrokerMessage(error.message, true);
+        });
+    });
+  }
+
+  if (brokerLoginBtn) {
+    brokerLoginBtn.addEventListener("click", function () {
+      postBroker("/api/user/broker/angel-one/login")
+        .then(function () {
+          setBrokerMessage("Angel One login connected.", false);
+        })
+        .catch(function (error) {
+          setBrokerMessage(error.message, true);
+        });
+    });
+  }
+
+  if (brokerDisconnectBtn) {
+    brokerDisconnectBtn.addEventListener("click", function () {
+      postBroker("/api/user/broker/angel-one/disconnect")
+        .then(function () {
+          setBrokerMessage("Angel One session disconnected.", false);
+        })
+        .catch(function (error) {
+          setBrokerMessage(error.message, true);
+        });
+    });
+  }
+
+  document.addEventListener("portal:viewchange", function (event) {
+    if (event.detail && event.detail.view === "broker") {
+      loadBrokerStatus(false);
+    }
+  });
+
   setActiveView(initialView());
+  loadBrokerStatus(true);
 })();

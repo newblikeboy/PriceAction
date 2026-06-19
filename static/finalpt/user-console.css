@@ -1013,6 +1013,35 @@ body.user-console .broker-card .action-row {
   margin-top: 0;
 }
 
+body.user-console .broker-status-grid {
+  display: grid;
+  gap: 0.52rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body.user-console .broker-check {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #244367;
+  font-weight: 700;
+}
+
+body.user-console .broker-check input {
+  width: 1rem;
+  height: 1rem;
+}
+
+body.user-console .action-btn.secondary {
+  background: #244367;
+}
+
+body.user-console .action-btn.ghost {
+  border: 1px solid rgba(31, 78, 216, 0.28);
+  background: rgba(244, 249, 255, 0.9);
+  color: #244367;
+}
+
 body.user-console .report-grid {
   margin-top: 0.75rem;
   display: grid;
@@ -1096,6 +1125,10 @@ body.user-console .profile-row strong {
   }
 
   body.user-console .placeholder-grid {
+    grid-template-columns: 1fr;
+  }
+
+  body.user-console .broker-status-grid {
     grid-template-columns: 1fr;
   }
 }

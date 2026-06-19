@@ -24,6 +24,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import pandas as pd
 
+from app.angel_execution import AngelExecutionError, AngelExecutionManager
 from app.config import BASE_DIR, config
 from app.data_loader import DataLoader
 from app.domain import SkippedSignal
@@ -47,6 +48,7 @@ _db: Database | None = None
 _loader: DataLoader | None = None
 _service: StrategyService | None = None
 _socket_session: FyersSocketSession | None = None
+_angel_execution: AngelExecutionManager | None = None
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
 _backtest_job_lock = threading.Lock()
 _backtest_job: dict[str, Any] = {}
@@ -149,6 +151,15 @@ class ReplayStepPayload(BaseModel):
     count: int = 1
 
 
+class BrokerProfilePayload(BaseModel):
+    client_id: str = ""
+    api_key: str | None = None
+    pin: str | None = None
+    totp_secret: str | None = None
+    trading_enabled: bool = False
+    lot_count: int = 1
+
+
 def get_db() -> Database:
     global _db
     if _db is None:
@@ -175,6 +186,13 @@ def get_socket_session() -> FyersSocketSession:
     if _socket_session is None:
         _socket_session = FyersSocketSession(get_loader(), on_price=process_fyers_tick)
     return _socket_session
+
+
+def get_angel_execution() -> AngelExecutionManager:
+    global _angel_execution
+    if _angel_execution is None:
+        _angel_execution = AngelExecutionManager(get_db())
+    return _angel_execution
 
 
 def runtime_cache_get(key: str, ttl_seconds: float, factory, *, copy_value: bool = True):
@@ -1157,6 +1175,26 @@ def matches_closed_5m_candle_time(event_time: str, candle_time: datetime) -> boo
     return event_time in {start_hhmm, close_hhmm}
 
 
+def dispatch_angel_entry_async(paper_trade_id: int, trade: dict[str, Any]) -> None:
+    def worker() -> None:
+        try:
+            get_angel_execution().dispatch_entry(paper_trade_id, dict(trade))
+        except Exception as exc:
+            logger.exception("Angel entry dispatch failed for paper trade %s: %s", paper_trade_id, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def dispatch_angel_exit_async(paper_trade_id: int, close_reason: str) -> None:
+    def worker() -> None:
+        try:
+            get_angel_execution().dispatch_exit(paper_trade_id, close_reason)
+        except Exception as exc:
+            logger.exception("Angel exit dispatch failed for paper trade %s: %s", paper_trade_id, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
     global _live_signal_last_error
     candle_time = candle.get("datetime")
@@ -1195,8 +1233,10 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
                 continue
             trade = paper.create_trade(signal).to_dict()
             attach_live_option_pricing(trade, signal)
-            if db.insert_trade_if_absent(trade) is not None:
+            new_trade_id = db.insert_trade_if_absent(trade)
+            if new_trade_id is not None:
                 saved_trades += 1
+                dispatch_angel_entry_async(int(new_trade_id), trade)
         for skipped_signal in skipped:
             if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
                 saved_skipped += 1
@@ -1360,6 +1400,7 @@ def update_live_open_trades(
                 },
             )
             changed = True
+            dispatch_angel_exit_async(trade_id, reason)
         except Exception:
             pass
     if changed:
@@ -2157,6 +2198,43 @@ async def backtest(
 @app.get("/api/backtest/latest")
 def api_latest_backtest(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     return current_backtest_payload()
+
+
+@app.get("/api/user/broker/angel-one")
+def api_user_broker_status(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}
+
+
+@app.post("/api/user/broker/angel-one")
+def api_user_broker_save(payload: BrokerProfilePayload, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    get_db().set_user_broker_profile(
+        str(user["username"]),
+        client_id=payload.client_id,
+        api_key=payload.api_key,
+        pin=payload.pin,
+        totp_secret=payload.totp_secret,
+        trading_enabled=bool(payload.trading_enabled),
+        lot_count=max(1, int(payload.lot_count or 1)),
+    )
+    runtime_cache_clear(f"user:{user['username']}")
+    return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}
+
+
+@app.post("/api/user/broker/angel-one/login")
+def api_user_broker_login(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    try:
+        result = get_angel_execution().login_user(str(user["username"]))
+        runtime_cache_clear(f"user:{user['username']}")
+        return {"ok": True, "login": result, "broker": get_angel_execution().status(str(user["username"]))}
+    except AngelExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/user/broker/angel-one/disconnect")
+def api_user_broker_disconnect(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    get_db().clear_user_angel_session(str(user["username"]))
+    runtime_cache_clear(f"user:{user['username']}")
+    return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}
 
 
 def render_admin(

@@ -67,10 +67,10 @@
         <section class="home-grid">
           <article class="card home-card control-card">
             <div class="line-head"><h2>Strategy Mode</h2></div>
-            <p class="small">This V1 is paper-trading-only. Live broker order execution is intentionally disabled.</p>
+            <p class="small">Paper trades remain the signal source. Angel One execution can be enabled from Broker after login.</p>
             <div class="switch-list">
               <div class="switch-row"><span>Paper Engine</span><button class="toggle-switch is-on" type="button" aria-checked="true">On</button></div>
-              <div class="switch-row"><span>Live Execution</span><button class="toggle-switch is-off" type="button" aria-checked="false">Off</button></div>
+              <div class="switch-row"><span>Live Execution</span><button id="home-live-execution-toggle" class="toggle-switch is-off" type="button" aria-checked="false">Off</button></div>
             </div>
           </article>
 
@@ -200,13 +200,28 @@
 
       <section class="portal-view" data-view="broker" hidden>
         <article class="card view-card">
-          <div class="line-head"><h2>Broker</h2><span class="small">Disabled in V1</span></div>
-          <p class="small">This project is currently paper-trading-only. Broker execution and user broker credentials will be added in a later stage with explicit safeguards.</p>
-          <div class="broker-card">
-            <div class="profile-row"><span>Execution Mode</span><strong>Paper only</strong></div>
-            <div class="profile-row"><span>Live Broker Orders</span><strong>Disabled</strong></div>
-            <div class="profile-row"><span>Data Source</span><strong>MySQL candle database</strong></div>
-          </div>
+          <div class="line-head"><h2>Broker</h2><span id="broker-status-chip" class="status-chip">Loading</span></div>
+          <p class="small">Connect Angel One to send live orders from the same paper trade open and close events.</p>
+          <form id="broker-form" class="broker-card">
+            <div class="broker-status-grid">
+              <div class="profile-row"><span>Server Live Switch</span><strong id="broker-server-status">--</strong></div>
+              <div class="profile-row"><span>Angel Session</span><strong id="broker-session-status">--</strong></div>
+              <div class="profile-row"><span>API Key</span><strong id="broker-api-key-status">--</strong></div>
+              <div class="profile-row"><span>Default Lot Size</span><strong id="broker-lot-size-status">--</strong></div>
+            </div>
+            <label class="field"><span>Angel Client ID</span><input id="broker-client-id-input" class="text-input" autocomplete="off"></label>
+            <label class="field"><span>API Key</span><input id="broker-api-key-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved key"></label>
+            <label class="field"><span>PIN</span><input id="broker-pin-input" class="text-input" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved PIN"></label>
+            <label class="field"><span>TOTP Secret</span><input id="broker-totp-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved secret"></label>
+            <label class="field"><span>Lots Per Trade</span><input id="broker-lot-count-input" class="text-input" type="number" min="1" step="1" value="1"></label>
+            <label class="broker-check"><input id="broker-trading-enabled-input" type="checkbox"><span>Enable this account for live Angel One orders</span></label>
+            <div class="action-row">
+              <button id="broker-save-btn" class="action-btn" type="submit">Save Broker</button>
+              <button id="broker-login-btn" class="action-btn secondary" type="button">Login Angel</button>
+              <button id="broker-disconnect-btn" class="action-btn ghost" type="button">Disconnect</button>
+            </div>
+            <p id="broker-message" class="small"></p>
+          </form>
         </article>
       </section>
 
@@ -224,11 +239,11 @@
       <section class="portal-view" data-view="helpdesk" hidden>
         <article class="card view-card">
           <h2>Helpdesk</h2>
-          <p class="small">For setup issues, check `read.md` first. The current build focuses on paper trades, database backtests, backend FYERS data, and ML-ready logs.</p>
+          <p class="small">For setup issues, check `read.md` first. The current build focuses on paper trades, database backtests, backend FYERS data, Angel One execution, and ML-ready logs.</p>
           <div class="placeholder-grid">
             <div class="placeholder-item"><h3>Admin</h3><p>Use `/admin/login` for FYERS and market-data controls.</p></div>
             <div class="placeholder-item"><h3>Input</h3><p>Backtests read 5m candles from MySQL.</p></div>
-            <div class="placeholder-item"><h3>Safety</h3><p>No live broker order placement in V1.</p></div>
+            <div class="placeholder-item"><h3>Safety</h3><p>Live broker placement requires the server switch and user broker toggle.</p></div>
           </div>
         </article>
       </section>
