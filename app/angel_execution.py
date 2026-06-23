@@ -26,7 +26,7 @@ class AngelExecutionManager:
         self.db = database
         self.timeout = float(os.getenv("ANGEL_REQUEST_TIMEOUT_SECONDS", "20"))
         self.execution_enabled = os.getenv("ANGEL_LIVE_EXECUTION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-        self.default_lot_size = max(1, int(os.getenv("ANGEL_LOT_SIZE_QTY", "75")))
+        self.default_lot_size_env = max(1, int(os.getenv("ANGEL_LOT_SIZE_QTY", "75")))
         self.product_type = os.getenv("ANGEL_PRODUCT_TYPE", "INTRADAY").strip().upper() or "INTRADAY"
         self.variety = os.getenv("ANGEL_ORDER_VARIETY", "NORMAL").strip().upper() or "NORMAL"
         self.duration = os.getenv("ANGEL_ORDER_DURATION", "DAY").strip().upper() or "DAY"
@@ -35,8 +35,12 @@ class AngelExecutionManager:
     def status(self, username: str) -> dict[str, Any]:
         config = self.db.broker_config(username)
         config["server_execution_enabled"] = self.execution_enabled
-        config["default_lot_size"] = self.default_lot_size
+        config["default_lot_size"] = self.default_lot_size()
+        config["order_quantity"] = int(config["default_lot_size"]) * max(1, int(config.get("lot_count") or 1))
         return config
+
+    def default_lot_size(self) -> int:
+        return self.db.execution_lot_size(self.default_lot_size_env)
 
     def login_user(self, username: str) -> dict[str, Any]:
         session = self.db.get_user_angel_session(username)
@@ -265,7 +269,7 @@ class AngelExecutionManager:
 
     def _order_quantity(self, session: dict[str, Any]) -> int:
         lot_count = max(1, int(session.get("lot_count") or 1))
-        return lot_count * self.default_lot_size
+        return lot_count * self.default_lot_size()
 
     def _order_payload(self, *, side: str, symbol: str, token: str, exchange: str, quantity: int) -> dict[str, Any]:
         return {

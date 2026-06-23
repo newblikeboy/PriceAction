@@ -44,6 +44,7 @@
       <nav class="side-nav" aria-label="Sections">
         <button type="button" class="side-nav-btn is-active" data-view-target="home">Home</button>
         <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
+        <button type="button" class="side-nav-btn" data-view-target="reports">Report</button>
         <button type="button" class="side-nav-btn" data-view-target="trades">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
         <button type="button" class="side-nav-btn" data-view-target="broker">Broker</button>
@@ -59,27 +60,29 @@
         <header class="home-head card">
           <div>
             <p class="label">Home</p>
-            <h1>Paper Trading Control Center</h1>
-            <p class="subtitle">Run paper backtests, inspect trade logs, and review skipped signals for ML-ready training data.</p>
+            <h1>Control Center</h1>
+            <p class="subtitle">Connect broker flow, track trade status, and monitor live paper performance.</p>
           </div>
         </header>
 
         <section class="home-grid">
           <article class="card home-card control-card">
-            <div class="line-head"><h2>Strategy Mode</h2></div>
-            <p class="small">Paper trades remain the signal source. Angel One execution can be enabled from Broker after login.</p>
+            <div class="line-head"><h2>Broker Control</h2></div>
+            <p class="small">Use Terminal Login to connect Angel One. Enable Trading Engine for live execution from paper trade signals.</p>
             <div class="switch-list">
-              <div class="switch-row"><span>Paper Engine</span><button class="toggle-switch is-on" type="button" aria-checked="true">On</button></div>
-              <div class="switch-row"><span>Live Execution</span><button id="home-live-execution-toggle" class="toggle-switch is-off" type="button" aria-checked="false">Off</button></div>
+              <div class="switch-row"><span>Terminal Login</span><button id="terminal-login-toggle" class="toggle-switch is-off" type="button" role="switch" aria-checked="false">Off</button></div>
+              <p id="angel-token-generated-msg" class="small">New token is generated on --</p>
+              <div class="switch-row"><span>Trading Engine</span><button id="trading-engine-toggle" class="toggle-switch is-off" type="button" role="switch" aria-checked="false">Off</button></div>
             </div>
+            <p id="trading-engine-msg" class="small">Trading engine is off. Only paper flow is active.</p>
           </article>
 
           <article class="card home-card pnl-card">
-            <div class="line-head"><h2>Paper P&amp;L</h2><span class="realtime-pill">Logged</span></div>
+            <div class="line-head"><h2>Profit &amp; Loss</h2><span class="realtime-pill">Realtime</span></div>
             <div class="kpi-grid-home">
-              <div class="kpi-box"><span>Total Points</span><strong>{{ stats.total_points }}</strong></div>
-              <div class="kpi-box"><span>Wins</span><strong>{{ stats.wins }}</strong></div>
-              <div class="kpi-box"><span>Losses</span><strong>{{ stats.losses }}</strong></div>
+              <div class="kpi-box"><span>Total PnL</span><strong>{{ stats.total_points }}</strong></div>
+              <div class="kpi-box"><span>Profitable</span><strong>{{ stats.wins }}</strong></div>
+              <div class="kpi-box"><span>Loss</span><strong>{{ stats.losses }}</strong></div>
               <div class="kpi-box"><span>Closed</span><strong>{{ stats.total_trades }}</strong></div>
               <div class="kpi-box"><span>Win Rate</span><strong>{{ stats.win_rate }}%</strong></div>
             </div>
@@ -91,18 +94,18 @@
           </article>
 
           <article class="card home-card trades-card">
-            <div class="line-head"><h2>Recent Closed Trades</h2></div>
+            <div class="line-head"><h2>Closed Trades</h2></div>
             <div class="paper-table-wrap compact-table paper-trades-wrap">
               <table class="paper-table paper-trades-table">
-                <thead><tr><th>#</th><th>Side</th><th>Setup</th><th>Option</th><th>Entry</th><th>Exit</th><th>Points</th><th>Outcome</th></tr></thead>
+                <thead><tr><th>#</th><th>Side</th><th>Contract</th><th>Entry</th><th>Exit</th><th>Pts</th><th>Outcome</th></tr></thead>
                 <tbody>
                   {% for trade in trades[:8] %}
                   <tr>
-                    <td>{{ loop.index }}</td><td>{{ trade.direction }}</td><td>{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td><td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td>
+                    <td>{{ loop.index }}</td><td>{{ trade.direction }}</td><td>{{ trade.option_symbol or trade.setup_type or "--" }}</td><td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td>
                     <td>{{ trade.option_exit_ltp or trade.exit_time or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.result or trade.status }}</td>
                   </tr>
                   {% else %}
-                  <tr><td colspan="8" class="small">No paper trades yet.</td></tr>
+                  <tr><td colspan="7" class="small">No paper trades yet.</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
@@ -134,19 +137,65 @@
           <p id="backtest-current-step" class="small">{{ latest_backtest.current_step if latest_backtest else "No backtest has been started yet." }}</p>
         </article>
 
-        <article class="card view-card latest-backtest-card">
-          <div class="line-head"><h2>Latest Backtest Result</h2><span id="latest-backtest-id" class="status-chip">#{{ latest_backtest.id if latest_backtest else "--" }}</span></div>
-          <div class="backtest-result-grid">
-            <div class="kpi-box"><span>Status</span><strong id="latest-backtest-status">{{ latest_backtest.status if latest_backtest else "No run" }}</strong></div>
-            <div class="kpi-box"><span>Total Trades</span><strong id="latest-total-trades">{{ latest_backtest.summary.get("total_trades", 0) if latest_backtest else 0 }}</strong></div>
-            <div class="kpi-box"><span>Wins</span><strong id="latest-wins">{{ latest_backtest.summary.get("wins", 0) if latest_backtest else 0 }}</strong></div>
-            <div class="kpi-box"><span>Losses</span><strong id="latest-losses">{{ latest_backtest.summary.get("losses", 0) if latest_backtest else 0 }}</strong></div>
-            <div class="kpi-box"><span>Win Rate</span><strong id="latest-win-rate">{{ latest_backtest.summary.get("win_rate", 0) if latest_backtest else 0 }}%</strong></div>
-            <div class="kpi-box"><span>Total Points</span><strong id="latest-total-r">{{ latest_backtest.summary.get("total_points", 0) if latest_backtest else 0 }}</strong></div>
-            <div class="kpi-box"><span>Avg Points</span><strong id="latest-average-r">{{ latest_backtest.summary.get("average_points", 0) if latest_backtest else 0 }}</strong></div>
-            <div class="kpi-box"><span>Skipped</span><strong id="latest-skipped">{{ latest_backtest.skipped_count if latest_backtest else 0 }}</strong></div>
+        <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
+      </section>
+
+      <section class="portal-view" data-view="reports" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>AI Trade Report</h2></div>
+          <form method="get" action="/dashboard" class="backtest-form">
+            <input type="hidden" name="view" value="reports">
+            <label class="field"><span>Report</span>
+              <select class="text-input" name="report_type">
+                <option value="backtest_trade" selected>Backtest Trade Report</option>
+              </select>
+            </label>
+            <label class="field"><span>From Date</span><input class="text-input" type="date" name="from_date" value="{{ report.from_date }}"></label>
+            <label class="field"><span>To Date</span><input class="text-input" type="date" name="to_date" value="{{ report.to_date }}"></label>
+            <button class="action-btn" type="submit">View Report</button>
+          </form>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Summary of Trade</h2></div>
+          <div class="backtest-result-grid paper-summary-grid">
+            <div class="kpi-box"><span>Total Trades</span><strong>{{ report.summary.total_trades }}</strong></div>
+            <div class="kpi-box"><span>Wins</span><strong>{{ report.summary.wins }}</strong></div>
+            <div class="kpi-box"><span>Losses</span><strong>{{ report.summary.losses }}</strong></div>
+            <div class="kpi-box"><span>Win Rate</span><strong>{{ report.summary.win_rate }}%</strong></div>
+            <div class="kpi-box"><span>Total Points</span><strong>{{ report.summary.total_points }}</strong></div>
+            <div class="kpi-box"><span>Avg Points</span><strong>{{ report.summary.average_points }}</strong></div>
           </div>
-          <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Trade Table</h2></div>
+          <div class="paper-table-wrap backtest-trade-table-wrap">
+            <table class="paper-table backtest-trade-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Exit Reason</th><th>Result</th><th>Points</th><th>R</th><th>Score</th><th>Why Trade</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% if not report.requested %}
+                <tr><td colspan="16" class="small">Select dates and click View Report.</td></tr>
+                {% else %}
+                {% for trade in report.trades %}
+                <tr>
+                  <td>{{ loop.index }}</td><td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
+                  <td class="truncate-cell wide-truncate" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td>
+                  <td>{{ trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.exit_index_price or "--" }}</td>
+                  <td>{{ trade.exit_reason or "--" }}</td><td>{{ trade.result or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.r_multiple if trade.r_multiple is not none else "" }}</td><td>{{ trade.setup_score if trade.setup_score is not none else "" }}</td>
+                  <td class="truncate-cell reason-cell" title="{{ trade.reason }}">{{ trade.reason or "--" }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="16" class="small">No backtest trades found for this report.</td></tr>
+                {% endfor %}
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
         </article>
       </section>
 
@@ -162,16 +211,16 @@
           </div>
           <div class="paper-table-wrap">
             <table class="paper-table">
-              <thead><tr><th>Date</th><th>Time</th><th>Direction</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
+              <thead><tr><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Direction</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
               <tbody>
                 {% for trade in trades %}
                 <tr>
-                  <td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.direction }}</td><td>{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td>
+                  <td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td><td>{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td>
                   <td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td>
                   <td>{{ trade.result or trade.status }}</td><td>{{ trade.points if trade.points is not none else "" }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="10" class="small">No trades logged yet.</td></tr>
+                <tr><td colspan="11" class="small">No trades logged yet.</td></tr>
                 {% endfor %}
               </tbody>
             </table>
@@ -200,25 +249,24 @@
 
       <section class="portal-view" data-view="broker" hidden>
         <article class="card view-card">
-          <div class="line-head"><h2>Broker</h2><span id="broker-status-chip" class="status-chip">Loading</span></div>
-          <p class="small">Connect Angel One to send live orders from the same paper trade open and close events.</p>
+          <div class="line-head">
+            <h2>Broker - Angel One</h2>
+            <span class="small">Terminal Credentials</span>
+          </div>
+          <p class="small">Save Angel terminal credentials here. Terminal Login uses these credentials to fetch tokens from the backend.</p>
           <form id="broker-form" class="broker-card">
             <div class="broker-status-grid">
-              <div class="profile-row"><span>Server Live Switch</span><strong id="broker-server-status">--</strong></div>
-              <div class="profile-row"><span>Angel Session</span><strong id="broker-session-status">--</strong></div>
-              <div class="profile-row"><span>API Key</span><strong id="broker-api-key-status">--</strong></div>
-              <div class="profile-row"><span>Default Lot Size</span><strong id="broker-lot-size-status">--</strong></div>
+              <div class="profile-row"><span>Saved Client ID</span><strong id="broker-client-id-value">Not set</strong></div>
+              <div class="profile-row"><span>Saved API Key</span><strong id="broker-api-key-status">--</strong></div>
+              <div class="profile-row"><span>Saved PIN</span><strong id="broker-pin-status">--</strong></div>
+              <div class="profile-row"><span>Saved TOTP Secret</span><strong id="broker-totp-status">--</strong></div>
             </div>
             <label class="field"><span>Angel Client ID</span><input id="broker-client-id-input" class="text-input" autocomplete="off"></label>
             <label class="field"><span>API Key</span><input id="broker-api-key-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved key"></label>
             <label class="field"><span>PIN</span><input id="broker-pin-input" class="text-input" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved PIN"></label>
             <label class="field"><span>TOTP Secret</span><input id="broker-totp-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved secret"></label>
-            <label class="field"><span>Lots Per Trade</span><input id="broker-lot-count-input" class="text-input" type="number" min="1" step="1" value="1"></label>
-            <label class="broker-check"><input id="broker-trading-enabled-input" type="checkbox"><span>Enable this account for live Angel One orders</span></label>
             <div class="action-row">
-              <button id="broker-save-btn" class="action-btn" type="submit">Save Broker</button>
-              <button id="broker-login-btn" class="action-btn secondary" type="button">Login Angel</button>
-              <button id="broker-disconnect-btn" class="action-btn ghost" type="button">Disconnect</button>
+              <button id="broker-save-btn" class="action-btn" type="submit">Save / Update</button>
             </div>
             <p id="broker-message" class="small"></p>
           </form>
@@ -232,24 +280,32 @@
             <div class="profile-row"><span>Username</span><strong>{{ user.username }}</strong></div>
             <div class="profile-row"><span>Role</span><strong>{{ user.role }}</strong></div>
             <div class="profile-row"><span>System</span><strong>Nifty Price Action AI</strong></div>
+            <div class="profile-row"><span>Lot Size Qty</span><strong id="profile-lot-size-qty-profile">--</strong></div>
+            <div class="profile-row"><span>My Lots</span><strong id="profile-lot-count-profile">--</strong></div>
+            <div class="profile-row"><span>Order Quantity</span><strong id="profile-order-qty-profile">--</strong></div>
           </div>
+          <label class="field"><span>Set My Lots</span><input id="user-lot-count-input-profile" class="text-input" type="number" min="1" step="1" value="1"></label>
+          <div class="action-row">
+            <button id="user-lot-count-save-btn-profile" class="action-btn" type="button">Save Lots</button>
+          </div>
+          <p id="user-lot-count-msg-profile" class="small">Lot settings not loaded yet.</p>
         </article>
       </section>
 
       <section class="portal-view" data-view="helpdesk" hidden>
         <article class="card view-card">
           <h2>Helpdesk</h2>
-          <p class="small">For setup issues, check `read.md` first. The current build focuses on paper trades, database backtests, backend FYERS data, Angel One execution, and ML-ready logs.</p>
+          <p class="small">Need support? Reach our helpdesk team for onboarding, broker setup, and trade report issues.</p>
           <div class="placeholder-grid">
-            <div class="placeholder-item"><h3>Admin</h3><p>Use `/admin/login` for FYERS and market-data controls.</p></div>
-            <div class="placeholder-item"><h3>Input</h3><p>Backtests read 5m candles from MySQL.</p></div>
-            <div class="placeholder-item"><h3>Safety</h3><p>Live broker placement requires the server switch and user broker toggle.</p></div>
+            <div class="placeholder-item"><h3>Email</h3><p>support@priceaction.local</p></div>
+            <div class="placeholder-item"><h3>Support Hours</h3><p>Mon-Sat | 9:00 AM - 7:00 PM IST</p></div>
+            <div class="placeholder-item"><h3>Response SLA</h3><p>Within 24 business hours</p></div>
           </div>
         </article>
       </section>
     </main>
   </div>
 
-  <script src="/static/finalpt/panel.js?v=points-2"></script>
+  <script src="/static/finalpt/panel.js?v=pain-user-1"></script>
 </body>
 </html>

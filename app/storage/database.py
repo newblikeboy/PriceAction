@@ -69,6 +69,15 @@ class Database:
                 self._ensure_user_broker_columns(cursor)
                 cursor.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        setting_key VARCHAR(191) PRIMARY KEY,
+                        setting_value TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                cursor.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS paper_trades (
                         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
                         date DATE NOT NULL,
@@ -133,6 +142,7 @@ class Database:
                     """
                     CREATE TABLE IF NOT EXISTS price_action_backtest_runs (
                         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+                        username VARCHAR(191),
                         symbol VARCHAR(64) NOT NULL,
                         start_date DATE,
                         end_date DATE,
@@ -145,11 +155,13 @@ class Database:
                         error_message TEXT,
                         started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         completed_at TIMESTAMP NULL,
+                        INDEX idx_backtest_user (username),
                         INDEX idx_backtest_started (started_at),
                         INDEX idx_backtest_status (status)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                self._ensure_backtest_run_columns(cursor)
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS angel_order_api_hits (
@@ -260,6 +272,15 @@ class Database:
             if name not in existing:
                 cursor.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
 
+    def _ensure_backtest_run_columns(self, cursor: Any) -> None:
+        cursor.execute(f"SHOW COLUMNS FROM {BACKTEST_RUNS_TABLE}")
+        existing = {str(row.get("Field") or "") for row in cursor.fetchall()}
+        if "username" not in existing:
+            cursor.execute(f"ALTER TABLE {BACKTEST_RUNS_TABLE} ADD COLUMN username VARCHAR(191) AFTER id")
+        cursor.execute(f"SHOW INDEX FROM {BACKTEST_RUNS_TABLE} WHERE Key_name = 'idx_backtest_user'")
+        if not cursor.fetchone():
+            cursor.execute(f"ALTER TABLE {BACKTEST_RUNS_TABLE} ADD INDEX idx_backtest_user (username)")
+
     @staticmethod
     def candle_table(timeframe: str) -> str:
         mapping = {
@@ -339,9 +360,12 @@ class Database:
         api_key: str | None = None,
         pin: str | None = None,
         totp_secret: str | None = None,
-        trading_enabled: bool = False,
-        lot_count: int = 1,
+        trading_enabled: bool | None = None,
+        lot_count: int | None = None,
     ) -> None:
+        existing = self.broker_config(username)
+        next_trading_enabled = existing.get("trading_enabled") if trading_enabled is None else bool(trading_enabled)
+        next_lot_count = existing.get("lot_count") if lot_count is None else max(1, int(lot_count or 1))
         with self.connect() as db:
             with db.cursor() as cursor:
                 cursor.execute(
@@ -360,11 +384,60 @@ class Database:
                         (api_key or "").strip(),
                         (pin or "").strip(),
                         (totp_secret or "").strip().replace(" ", ""),
-                        1 if trading_enabled else 0,
-                        max(1, int(lot_count or 1)),
+                        1 if next_trading_enabled else 0,
+                        max(1, int(next_lot_count or 1)),
                         username,
                     ),
                 )
+
+    def set_user_trading_enabled(self, username: str, enabled: bool) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE users SET angel_trading_enabled = %s WHERE username = %s",
+                    (1 if enabled else 0, username),
+                )
+
+    def set_user_lot_count(self, username: str, lot_count: int) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE users SET angel_lot_count = %s WHERE username = %s",
+                    (max(1, int(lot_count or 1)), username),
+                )
+
+    def get_app_setting(self, key: str, default: str = "") -> str:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT setting_value FROM app_settings WHERE setting_key = %s", (key,))
+                row = cursor.fetchone()
+        if not row:
+            return default
+        value = row.get("setting_value")
+        return str(value) if value is not None else default
+
+    def set_app_setting(self, key: str, value: str) -> None:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO app_settings (setting_key, setting_value)
+                    VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+                    """,
+                    (key, value),
+                )
+
+    def execution_lot_size(self, fallback: int = 75) -> int:
+        try:
+            return max(1, int(self.get_app_setting("angel_lot_size_qty", str(fallback)) or fallback))
+        except (TypeError, ValueError):
+            return max(1, int(fallback or 75))
+
+    def set_execution_lot_size(self, lot_size_qty: int) -> int:
+        value = max(1, int(lot_size_qty or 1))
+        self.set_app_setting("angel_lot_size_qty", str(value))
+        return value
 
     def save_user_angel_session(
         self,
@@ -898,15 +971,21 @@ class Database:
                         ],
                     )
 
-    def create_backtest_run(self, symbol: str, start_date: str | None, end_date: str | None) -> int:
+    def create_backtest_run(
+        self,
+        symbol: str,
+        start_date: str | None,
+        end_date: str | None,
+        username: str | None = None,
+    ) -> int:
         with self.connect() as db:
             with db.cursor() as cursor:
                 cursor.execute(
                     f"""
-                    INSERT INTO {BACKTEST_RUNS_TABLE} (symbol, start_date, end_date, status, progress_pct, current_step)
-                    VALUES (%s, %s, %s, 'RUNNING', 0, 'Queued')
+                    INSERT INTO {BACKTEST_RUNS_TABLE} (username, symbol, start_date, end_date, status, progress_pct, current_step)
+                    VALUES (%s, %s, %s, %s, 'RUNNING', 0, 'Queued')
                     """,
-                    (symbol, start_date or None, end_date or None),
+                    (username or None, symbol, start_date or None, end_date or None),
                 )
                 return int(cursor.lastrowid)
 
@@ -955,10 +1034,16 @@ class Database:
             with db.cursor() as cursor:
                 cursor.execute(f"UPDATE {BACKTEST_RUNS_TABLE} SET {', '.join(assignments)} WHERE id = %s", tuple(params))
 
-    def latest_backtest_run(self) -> dict[str, Any] | None:
+    def latest_backtest_run(self, username: str | None = None) -> dict[str, Any] | None:
         with self.connect() as db:
             with db.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {BACKTEST_RUNS_TABLE} ORDER BY id DESC LIMIT 1")
+                if username:
+                    cursor.execute(
+                        f"SELECT * FROM {BACKTEST_RUNS_TABLE} WHERE username = %s ORDER BY id DESC LIMIT 1",
+                        (username,),
+                    )
+                else:
+                    cursor.execute(f"SELECT * FROM {BACKTEST_RUNS_TABLE} ORDER BY id DESC LIMIT 1")
                 row = cursor.fetchone()
         if not row:
             return None
@@ -988,20 +1073,76 @@ class Database:
                 )
                 return list(cursor.fetchall())
 
-    def list_trades(self, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as db:
-            with db.cursor() as cursor:
-                cursor.execute("SELECT * FROM paper_trades ORDER BY id DESC LIMIT %s", (limit,))
-                return list(cursor.fetchall())
-
-    def list_trades_between(self, start_date: str, end_date: str, symbol: str = "NIFTY", limit: int = 1000) -> list[dict[str, Any]]:
+    def list_backtest_report_trades(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        username: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        conditions = ["t.backtest_run_id IS NOT NULL"]
+        params: list[Any] = []
+        if username:
+            conditions.append("r.username = %s")
+            params.append(username)
+        if start_date:
+            conditions.append("t.date >= %s")
+            params.append(start_date)
+        if end_date:
+            conditions.append("t.date <= %s")
+            params.append(end_date)
+        params.append(int(limit))
         with self.connect() as db:
             with db.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
+                    SELECT t.*, r.username AS backtest_username
+                    FROM paper_trades t
+                    INNER JOIN {BACKTEST_RUNS_TABLE} r ON r.id = t.backtest_run_id
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY t.date ASC, t.entry_time ASC, t.id ASC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                return list(cursor.fetchall())
+
+    def list_trades(self, limit: int = 100, include_backtests: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                if include_backtests:
+                    cursor.execute("SELECT * FROM paper_trades ORDER BY id DESC LIMIT %s", (limit,))
+                else:
+                    cursor.execute(
+                        """
+                        SELECT *
+                        FROM paper_trades
+                        WHERE backtest_run_id IS NULL
+                        ORDER BY id DESC
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                return list(cursor.fetchall())
+
+    def list_trades_between(
+        self,
+        start_date: str,
+        end_date: str,
+        symbol: str = "NIFTY",
+        limit: int = 1000,
+        include_backtests: bool = False,
+    ) -> list[dict[str, Any]]:
+        backtest_filter = "" if include_backtests else "AND backtest_run_id IS NULL"
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    f"""
                     SELECT *
                     FROM paper_trades
                     WHERE symbol = %s AND date BETWEEN %s AND %s
+                    {backtest_filter}
                     ORDER BY date ASC, entry_time ASC
                     LIMIT %s
                     """,

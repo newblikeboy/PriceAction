@@ -51,9 +51,11 @@
         <button type="button" class="side-nav-btn is-active" data-view-target="home">Overview</button>
         <button type="button" class="side-nav-btn" data-view-target="chart">Live Chart</button>
         <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
+        <button type="button" class="side-nav-btn" data-view-target="reports">Reports</button>
         <button type="button" class="side-nav-btn" data-view-target="replay">Replay Bar</button>
         <button type="button" class="side-nav-btn" data-view-target="zone-detection">Zone Detection</button>
         <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
+        <button type="button" class="side-nav-btn" data-view-target="lot-settings">Lot Settings</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
       </nav>
@@ -205,59 +207,72 @@
           <p id="backtest-current-step" class="small">{{ latest_backtest.current_step if latest_backtest else "No backtest has been started yet." }}</p>
         </article>
 
-        <article class="card view-card latest-backtest-card">
-          <div class="line-head"><h2>Latest Backtest Result</h2><span id="latest-backtest-id" class="status-chip">#{{ latest_backtest.id if latest_backtest else "--" }}</span></div>
+        <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
+      </section>
+
+      <section class="portal-view" data-view="reports" hidden>
+        <article class="card view-card">
+          <div class="line-head"><h2>Reports</h2></div>
+          <form method="get" action="/admin" class="backtest-form admin-backtest-form">
+            <input type="hidden" name="view" value="reports">
+            <label class="field"><span>Report</span>
+              <select class="text-input" name="report_type">
+                <option value="backtest_trade" selected>Backtest Trade Report</option>
+              </select>
+            </label>
+            <label class="field"><span>From Date</span><input class="text-input" type="date" name="from_date" value="{{ report.from_date }}"></label>
+            <label class="field"><span>To Date</span><input class="text-input" type="date" name="to_date" value="{{ report.to_date }}"></label>
+            <button class="action-btn" type="submit">View Report</button>
+          </form>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Summary of Trade</h2></div>
           <div class="paper-table-wrap backtest-summary-table-wrap">
             <table class="paper-table backtest-summary-table">
               <thead>
                 <tr>
-                  <th>Status</th><th>Total Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total Points</th><th>Avg Points</th><th>Skipped</th>
+                  <th>Total Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total Points</th><th>Avg Points</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td id="latest-backtest-status">{{ latest_backtest.status if latest_backtest else "No run" }}</td>
-                  <td id="latest-total-trades">{{ latest_backtest.summary.get("total_trades", 0) if latest_backtest else 0 }}</td>
-                  <td id="latest-wins">{{ latest_backtest.summary.get("wins", 0) if latest_backtest else 0 }}</td>
-                  <td id="latest-losses">{{ latest_backtest.summary.get("losses", 0) if latest_backtest else 0 }}</td>
-                  <td id="latest-win-rate">{{ latest_backtest.summary.get("win_rate", 0) if latest_backtest else 0 }}%</td>
-                  <td id="latest-total-r">{{ latest_backtest.summary.get("total_points", 0) if latest_backtest else 0 }}</td>
-                  <td id="latest-average-r">{{ latest_backtest.summary.get("average_points", 0) if latest_backtest else 0 }}</td>
-                  <td id="latest-skipped">{{ latest_backtest.skipped_count if latest_backtest else 0 }}</td>
+                  <td>{{ report.summary.total_trades }}</td>
+                  <td>{{ report.summary.wins }}</td>
+                  <td>{{ report.summary.losses }}</td>
+                  <td>{{ report.summary.win_rate }}%</td>
+                  <td>{{ report.summary.total_points }}</td>
+                  <td>{{ report.summary.average_points }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
         </article>
 
         <article class="card view-card">
-          <div class="line-head">
-            <div>
-              <p class="label">Trade Audit</p>
-              <h2>Full Backtest Trade Table</h2>
-            </div>
-          </div>
+          <div class="line-head"><h2>Trade Table</h2></div>
           <div class="paper-table-wrap backtest-trade-table-wrap">
             <table class="paper-table backtest-trade-table">
               <thead>
                 <tr>
-                  <th>#</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Exit Reason</th><th>Result</th><th>Points</th><th>R</th><th>Score</th><th>Why Trade</th>
+                  <th>#</th><th>User</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Exit Reason</th><th>Result</th><th>Points</th><th>R</th><th>Score</th><th>Why Trade</th>
                 </tr>
               </thead>
-              <tbody id="latest-backtest-trades-body">
-                {% if latest_backtest and latest_backtest.trades %}
-                {% for trade in latest_backtest.trades %}
+              <tbody>
+                {% if not report.requested %}
+                <tr><td colspan="17" class="small">Select dates and click View Report.</td></tr>
+                {% else %}
+                {% for trade in report.trades %}
                 <tr>
-                  <td>{{ loop.index }}</td><td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
+                  <td>{{ loop.index }}</td><td>{{ trade.username or "--" }}</td><td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
                   <td class="truncate-cell wide-truncate" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td>
                   <td>{{ trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.exit_index_price or "--" }}</td>
                   <td>{{ trade.exit_reason or "--" }}</td><td>{{ trade.result or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.r_multiple if trade.r_multiple is not none else "" }}</td><td>{{ trade.setup_score if trade.setup_score is not none else "" }}</td>
                   <td class="truncate-cell reason-cell" title="{{ trade.reason }}">{{ trade.reason or "--" }}</td>
                 </tr>
-                {% endfor %}
                 {% else %}
-                <tr><td colspan="16" class="small">No trades for the latest backtest run yet.</td></tr>
+                <tr><td colspan="17" class="small">No backtest trades found for this report.</td></tr>
+                {% endfor %}
                 {% endif %}
               </tbody>
             </table>
@@ -408,20 +423,37 @@
             <div class="line-head"><p class="label">Recent Paper Trades</p></div>
             <div class="paper-table-wrap">
               <table class="paper-table">
-                <thead><tr><th>Date</th><th>Side</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
+                <thead><tr><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Side</th><th>Setup</th><th>Option</th><th>Entry</th><th>SL</th><th>Target</th><th>Result</th><th>Points</th></tr></thead>
                 <tbody>
                   {% for trade in trades %}
                   <tr>
-                    <td>{{ trade.date }}</td><td>{{ trade.direction }}</td>
+                    <td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
                     <td class="truncate-cell" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td><td>{{ trade.option_symbol or "--" }}</td><td>{{ trade.option_entry_ltp or trade.entry_index_price }}</td>
                     <td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.result or trade.status }}</td><td>{{ trade.points if trade.points is not none else "" }}</td>
                   </tr>
                   {% else %}
-                  <tr><td colspan="9" class="small">No paper trades yet.</td></tr>
+                  <tr><td colspan="11" class="small">No paper trades yet.</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
             </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="portal-view" data-view="lot-settings" hidden>
+        <section class="grid paper-grid">
+          <article class="card">
+            <div class="line-head"><p class="label">Execution Lot Size</p></div>
+            <p class="small">Set the global lot size quantity used for Angel One live order quantity math.</p>
+            <div class="backtest-form">
+              <label class="field"><span>Lot Size Quantity</span><input id="admin-lot-size-input" class="text-input" type="number" min="1" step="1" value="75"></label>
+            </div>
+            <div class="action-row">
+              <button id="admin-lot-size-save-btn" class="action-btn" type="button">Save Lot Size</button>
+            </div>
+            <p id="admin-lot-size-current" class="small mono">Current lot size: --</p>
+            <p id="admin-lot-size-msg" class="small">Not loaded yet.</p>
           </article>
         </section>
       </section>
@@ -452,7 +484,7 @@
     </main>
   </div>
 
-  <script src="/static/finalpt/panel.js?v=admin-backtest-fit-1"></script>
+  <script src="/static/finalpt/panel.js?v=pain-user-1"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/finalpt/admin-chart.js?v=zone-ranges-4"></script>
   <script src="/static/finalpt/admin-replay.js?v=replay-context-days-2"></script>

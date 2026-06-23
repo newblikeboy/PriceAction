@@ -28,12 +28,20 @@
   const latestBacktestError = document.getElementById("latest-backtest-error");
   const latestBacktestTradesBody = document.getElementById("latest-backtest-trades-body");
   const homeLiveExecutionToggle = document.getElementById("home-live-execution-toggle");
+  const terminalLoginToggle = document.getElementById("terminal-login-toggle");
+  const angelTokenGeneratedMsg = document.getElementById("angel-token-generated-msg");
+  const tradingEngineToggle = document.getElementById("trading-engine-toggle");
+  const tradingEngineMsg = document.getElementById("trading-engine-msg");
   const brokerForm = document.getElementById("broker-form");
   const brokerStatusChip = document.getElementById("broker-status-chip");
   const brokerServerStatus = document.getElementById("broker-server-status");
   const brokerSessionStatus = document.getElementById("broker-session-status");
+  const brokerClientIdValue = document.getElementById("broker-client-id-value");
   const brokerApiKeyStatus = document.getElementById("broker-api-key-status");
+  const brokerPinStatus = document.getElementById("broker-pin-status");
+  const brokerTotpStatus = document.getElementById("broker-totp-status");
   const brokerLotSizeStatus = document.getElementById("broker-lot-size-status");
+  const brokerOrderQuantityStatus = document.getElementById("broker-order-quantity-status");
   const brokerClientIdInput = document.getElementById("broker-client-id-input");
   const brokerApiKeyInput = document.getElementById("broker-api-key-input");
   const brokerPinInput = document.getElementById("broker-pin-input");
@@ -44,8 +52,26 @@
   const brokerLoginBtn = document.getElementById("broker-login-btn");
   const brokerDisconnectBtn = document.getElementById("broker-disconnect-btn");
   const brokerMessage = document.getElementById("broker-message");
+  const profileLotSizeQty = document.getElementById("profile-lot-size-qty");
+  const profileLotCount = document.getElementById("profile-lot-count");
+  const profileOrderQty = document.getElementById("profile-order-qty");
+  const profileLotSizeQtyProfile = document.getElementById("profile-lot-size-qty-profile");
+  const profileLotCountProfile = document.getElementById("profile-lot-count-profile");
+  const profileOrderQtyProfile = document.getElementById("profile-order-qty-profile");
+  const lotOrderQuantityChip = document.getElementById("lot-order-quantity-chip");
+  const userLotCountInput = document.getElementById("user-lot-count-input");
+  const userLotCountInputProfile = document.getElementById("user-lot-count-input-profile");
+  const userLotCountSaveBtn = document.getElementById("user-lot-count-save-btn");
+  const userLotCountSaveBtnProfile = document.getElementById("user-lot-count-save-btn-profile");
+  const userLotCountMsg = document.getElementById("user-lot-count-msg");
+  const userLotCountMsgProfile = document.getElementById("user-lot-count-msg-profile");
+  const adminLotSizeInput = document.getElementById("admin-lot-size-input");
+  const adminLotSizeSaveBtn = document.getElementById("admin-lot-size-save-btn");
+  const adminLotSizeCurrent = document.getElementById("admin-lot-size-current");
+  const adminLotSizeMsg = document.getElementById("admin-lot-size-msg");
   let backtestPollTimer = null;
   let brokerLoaded = false;
+  let brokerState = {};
   const viewStorageKey = `priceAction.activeView.${window.location.pathname}`;
 
   function isMobile() {
@@ -111,9 +137,6 @@
       storedView = window.localStorage.getItem(viewStorageKey) || "";
     } catch (error) {
       storedView = "";
-    }
-    if (window.location.search.indexOf("backtest") >= 0) {
-      return "backtest";
     }
     return queryView || hashView || storedView || "home";
   }
@@ -186,15 +209,43 @@
   }
 
   function setBrokerBusy(busy) {
-    [brokerSaveBtn, brokerLoginBtn, brokerDisconnectBtn].forEach(function (button) {
+    [brokerSaveBtn, brokerLoginBtn, brokerDisconnectBtn, terminalLoginToggle, tradingEngineToggle, userLotCountSaveBtn, userLotCountSaveBtnProfile].forEach(function (button) {
       if (button) {
         button.disabled = Boolean(busy);
       }
     });
   }
 
+  function formatTokenTime(value) {
+    const ts = Number(value || 0);
+    if (!Number.isFinite(ts) || ts <= 0) {
+      return "--";
+    }
+    return new Date(ts * 1000).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  }
+
+  function setSwitch(button, on) {
+    if (!button) {
+      return;
+    }
+    const enabled = Boolean(on);
+    button.classList.toggle("is-on", enabled);
+    button.classList.toggle("is-off", !enabled);
+    button.textContent = enabled ? "On" : "Off";
+    button.setAttribute("aria-checked", enabled ? "true" : "false");
+  }
+
   function renderBrokerStatus(payload) {
     const broker = payload && payload.broker ? payload.broker : payload || {};
+    brokerState = broker;
     brokerLoaded = true;
     const serverOn = Boolean(broker.server_execution_enabled);
     const userOn = Boolean(broker.trading_enabled);
@@ -203,22 +254,52 @@
     setText(brokerStatusChip, fullyOn ? "Live Ready" : connected ? "Connected" : "Not Connected");
     setText(brokerServerStatus, serverOn ? "Enabled" : "Disabled");
     setText(brokerSessionStatus, connected ? "Connected" : "Disconnected");
+    setText(brokerClientIdValue, broker.client_id || "Not set");
     setText(brokerApiKeyStatus, broker.api_key_masked || "Not saved");
+    setText(brokerPinStatus, broker.pin_saved ? "Saved" : "Not saved");
+    setText(brokerTotpStatus, broker.totp_saved ? "Saved" : "Not saved");
     setText(brokerLotSizeStatus, String(broker.default_lot_size || "--"));
+    setText(brokerOrderQuantityStatus, String(broker.order_quantity || "--"));
+    setText(profileLotSizeQty, String(broker.default_lot_size || "--"));
+    setText(profileLotCount, String(broker.lot_count || "--"));
+    setText(profileOrderQty, String(broker.order_quantity || "--"));
+    setText(profileLotSizeQtyProfile, String(broker.default_lot_size || "--"));
+    setText(profileLotCountProfile, String(broker.lot_count || "--"));
+    setText(profileOrderQtyProfile, String(broker.order_quantity || "--"));
+    setText(lotOrderQuantityChip, broker.order_quantity ? `Qty ${broker.order_quantity}` : "--");
+    if (angelTokenGeneratedMsg) {
+      angelTokenGeneratedMsg.textContent = `New token is generated on ${formatTokenTime(broker.token_exchanged_at)}`;
+    }
     if (brokerClientIdInput) {
       brokerClientIdInput.value = broker.client_id || "";
     }
     if (brokerLotCountInput) {
       brokerLotCountInput.value = String(broker.lot_count || 1);
     }
+    if (userLotCountInput) {
+      userLotCountInput.value = String(broker.lot_count || 1);
+    }
+    if (userLotCountInputProfile) {
+      userLotCountInputProfile.value = String(broker.lot_count || 1);
+    }
     if (brokerTradingEnabledInput) {
       brokerTradingEnabledInput.checked = userOn;
     }
+    setSwitch(terminalLoginToggle, connected);
+    setSwitch(tradingEngineToggle, fullyOn);
     if (homeLiveExecutionToggle) {
-      homeLiveExecutionToggle.classList.toggle("is-on", fullyOn);
-      homeLiveExecutionToggle.classList.toggle("is-off", !fullyOn);
-      homeLiveExecutionToggle.textContent = fullyOn ? "On" : "Off";
-      homeLiveExecutionToggle.setAttribute("aria-checked", fullyOn ? "true" : "false");
+      setSwitch(homeLiveExecutionToggle, fullyOn);
+    }
+    if (tradingEngineMsg) {
+      if (fullyOn) {
+        tradingEngineMsg.textContent = "Trading engine is on. Live execution is enabled for your account.";
+      } else if (userOn && !connected) {
+        tradingEngineMsg.textContent = "Trading engine is on, but Terminal Login is disconnected. Live execution is blocked.";
+      } else if (userOn && !serverOn) {
+        tradingEngineMsg.textContent = "Trading engine is on, but the server live switch is disabled.";
+      } else {
+        tradingEngineMsg.textContent = "Trading engine is off. Only paper flow is active.";
+      }
     }
   }
 
@@ -267,6 +348,52 @@
       })
       .finally(function () {
         setBrokerBusy(false);
+      });
+  }
+
+  function postJson(url, body) {
+    const options = {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Requested-With": "fetch",
+      },
+      body: JSON.stringify(body || {}),
+    };
+    return fetch(url, options).then(function (response) {
+      if (!response.ok) {
+        return response.json().then(function (payload) {
+          throw new Error(payload.detail || "Request failed");
+        });
+      }
+      return response.json();
+    });
+  }
+
+  function loadAdminLotSize() {
+    if (!adminLotSizeInput && !adminLotSizeCurrent) {
+      return Promise.resolve();
+    }
+    return fetch("/api/admin/execution/lot-size", {
+      headers: { "Accept": "application/json", "X-Requested-With": "fetch" },
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("Lot size request failed");
+        }
+        return response.json();
+      })
+      .then(function (payload) {
+        const lotSize = Number(payload.lot_size_qty || 1);
+        if (adminLotSizeInput) {
+          adminLotSizeInput.value = String(lotSize);
+        }
+        setText(adminLotSizeCurrent, `Current lot size: ${lotSize}`);
+        setText(adminLotSizeMsg, "Loaded.");
+      })
+      .catch(function (error) {
+        setText(adminLotSizeMsg, error.message);
       });
   }
 
@@ -422,8 +549,6 @@
         api_key: brokerApiKeyInput ? brokerApiKeyInput.value.trim() : "",
         pin: brokerPinInput ? brokerPinInput.value.trim() : "",
         totp_secret: brokerTotpInput ? brokerTotpInput.value.trim() : "",
-        trading_enabled: brokerTradingEnabledInput ? brokerTradingEnabledInput.checked : false,
-        lot_count: brokerLotCountInput ? Number(brokerLotCountInput.value || 1) : 1,
       })
         .then(function () {
           setBrokerMessage("Broker profile saved.", false);
@@ -455,6 +580,99 @@
     });
   }
 
+  if (terminalLoginToggle) {
+    terminalLoginToggle.addEventListener("click", function () {
+      const connected = Boolean(brokerState.connected && brokerState.has_access_token);
+      postBroker(connected ? "/api/user/broker/angel-one/disconnect" : "/api/user/broker/angel-one/login")
+        .then(function () {
+          setBrokerMessage(connected ? "Terminal Login disconnected." : "Terminal Login connected.", false);
+        })
+        .catch(function (error) {
+          setBrokerMessage(error.message, true);
+        });
+    });
+  }
+
+  if (tradingEngineToggle) {
+    tradingEngineToggle.addEventListener("click", function () {
+      const nextEnabled = !Boolean(brokerState.trading_enabled);
+      setBrokerBusy(true);
+      postJson("/api/user/trading-engine", { enabled: nextEnabled })
+        .then(function (payload) {
+          renderBrokerStatus(payload);
+          setBrokerMessage(nextEnabled ? "Trading engine enabled." : "Trading engine disabled.", false);
+        })
+        .catch(function (error) {
+          setBrokerMessage(error.message, true);
+        })
+        .finally(function () {
+          setBrokerBusy(false);
+        });
+    });
+  }
+
+  function saveUserLots(sourceInput, sourceButton, sourceMessage) {
+    const lotCount = sourceInput ? Number(sourceInput.value || 1) : 1;
+    if (sourceButton) {
+      sourceButton.disabled = true;
+    }
+    setText(userLotCountMsg, "Saving lots...");
+    setText(userLotCountMsgProfile, "Saving lots...");
+    postJson("/api/user/lots", { lot_count: lotCount })
+      .then(function () {
+        setText(userLotCountMsg, "Lots saved.");
+        setText(userLotCountMsgProfile, "Lots saved.");
+        if (sourceMessage && sourceMessage !== userLotCountMsg && sourceMessage !== userLotCountMsgProfile) {
+          setText(sourceMessage, "Lots saved.");
+        }
+        return loadBrokerStatus(true);
+      })
+      .catch(function (error) {
+        setText(userLotCountMsg, error.message);
+        setText(userLotCountMsgProfile, error.message);
+      })
+      .finally(function () {
+        if (sourceButton) {
+          sourceButton.disabled = false;
+        }
+      });
+  }
+
+  if (userLotCountSaveBtn) {
+    userLotCountSaveBtn.addEventListener("click", function () {
+      saveUserLots(userLotCountInput, userLotCountSaveBtn, userLotCountMsg);
+    });
+  }
+
+  if (userLotCountSaveBtnProfile) {
+    userLotCountSaveBtnProfile.addEventListener("click", function () {
+      saveUserLots(userLotCountInputProfile, userLotCountSaveBtnProfile, userLotCountMsgProfile);
+    });
+  }
+
+  if (adminLotSizeSaveBtn) {
+    adminLotSizeSaveBtn.addEventListener("click", function () {
+      const lotSize = adminLotSizeInput ? Number(adminLotSizeInput.value || 1) : 1;
+      adminLotSizeSaveBtn.disabled = true;
+      setText(adminLotSizeMsg, "Saving lot size...");
+      postJson("/api/admin/execution/lot-size", { lot_size_qty: lotSize })
+        .then(function (payload) {
+          const saved = Number(payload.lot_size_qty || lotSize);
+          if (adminLotSizeInput) {
+            adminLotSizeInput.value = String(saved);
+          }
+          setText(adminLotSizeCurrent, `Current lot size: ${saved}`);
+          setText(adminLotSizeMsg, "Lot size saved.");
+        })
+        .catch(function (error) {
+          setText(adminLotSizeMsg, error.message);
+        })
+        .finally(function () {
+          adminLotSizeSaveBtn.disabled = false;
+        });
+    });
+  }
+
   if (brokerDisconnectBtn) {
     brokerDisconnectBtn.addEventListener("click", function () {
       postBroker("/api/user/broker/angel-one/disconnect")
@@ -471,8 +689,13 @@
     if (event.detail && event.detail.view === "broker") {
       loadBrokerStatus(false);
     }
+    if (event.detail && event.detail.view === "lot-settings") {
+      loadBrokerStatus(true);
+      loadAdminLotSize();
+    }
   });
 
   setActiveView(initialView());
   loadBrokerStatus(true);
+  loadAdminLotSize();
 })();

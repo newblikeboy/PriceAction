@@ -156,8 +156,20 @@ class BrokerProfilePayload(BaseModel):
     api_key: str | None = None
     pin: str | None = None
     totp_secret: str | None = None
-    trading_enabled: bool = False
+    trading_enabled: bool | None = None
+    lot_count: int | None = None
+
+
+class TradingEnginePayload(BaseModel):
+    enabled: bool
+
+
+class UserLotPayload(BaseModel):
     lot_count: int = 1
+
+
+class ExecutionLotSizePayload(BaseModel):
+    lot_size_qty: int = 75
 
 
 def get_db() -> Database:
@@ -407,7 +419,7 @@ def cached_user(username: str) -> dict[str, Any] | None:
 
 
 def cached_trades(limit: int) -> list[dict[str, Any]]:
-    trades = runtime_cache_get(f"trades:{limit}", 5, lambda: get_db().list_trades(limit), copy_value=True)
+    trades = runtime_cache_get(f"trades:paper:{limit}", 5, lambda: get_db().list_trades(limit), copy_value=True)
     return [enrich_trade_points(dict(trade)) for trade in trades]
 
 
@@ -527,6 +539,7 @@ def trade_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
         "wins": len(wins),
         "losses": len(losses),
         "total_points": round(total_points, 2),
+        "average_points": round((total_points / len(closed)), 2) if closed else 0,
         "win_rate": win_rate,
     }
 
@@ -657,6 +670,7 @@ def public_backtest_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
     summary = run.get("summary") or {}
     return {
         "id": run.get("id"),
+        "username": run.get("username") or "",
         "symbol": run.get("symbol"),
         "start_date": str(run.get("start_date")) if run.get("start_date") else None,
         "end_date": str(run.get("end_date")) if run.get("end_date") else None,
@@ -700,6 +714,7 @@ def public_backtest_trade(trade: dict[str, Any]) -> dict[str, Any]:
     item = enrich_trade_points(dict(trade))
     return {
         "id": item.get("id"),
+        "username": item.get("backtest_username") or item.get("username") or "",
         "date": str(item.get("date")) if item.get("date") else "",
         "entry_time": item.get("entry_time") or "",
         "exit_time": item.get("exit_time") or "",
@@ -710,6 +725,7 @@ def public_backtest_trade(trade: dict[str, Any]) -> dict[str, Any]:
         "target_index_price": item.get("target_index_price"),
         "exit_index_price": item.get("exit_index_price"),
         "exit_reason": item.get("exit_reason") or "",
+        "status": item.get("status") or "",
         "result": item.get("result") or item.get("status") or "",
         "points": item.get("points"),
         "r_multiple": item.get("r_multiple"),
@@ -725,27 +741,66 @@ def latest_backtest_trades(limit: int = 1000, run: dict[str, Any] | None = None)
         return []
     db = get_db()
     trades = db.list_backtest_trades(int(latest["id"]), limit=limit)
-    if not trades and latest.get("start_date") and latest.get("end_date"):
-        trades = db.list_trades_between(
-            str(latest["start_date"]),
-            str(latest["end_date"]),
-            symbol=str(latest.get("symbol") or "NIFTY"),
-            limit=limit,
-        )
     return [public_backtest_trade(trade) for trade in trades]
 
 
-def current_backtest_payload() -> dict[str, Any]:
+def current_backtest_payload(user: dict[str, Any] | None = None) -> dict[str, Any]:
+    username = str(user.get("username") or "") if user and user.get("role") != "admin" else None
     with _backtest_job_lock:
         active_job = dict(_backtest_job) if _backtest_job.get("status") == "running" else None
-    if active_job:
+    if active_job and (username is None or active_job.get("username") == username):
         active_job["trades"] = latest_backtest_trades(run=active_job)
         return {"active": True, "latest": active_job}
-    raw_latest = get_db().latest_backtest_run()
+    raw_latest = get_db().latest_backtest_run(username=username)
     latest = public_backtest_run(raw_latest)
     if latest:
         latest["trades"] = latest_backtest_trades(run=raw_latest)
     return {"active": False, "latest": latest}
+
+
+def clean_report_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return pd.to_datetime(value).date().isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def backtest_report_payload(
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    username: str | None = None,
+    limit: int = 1000,
+    requested: bool = False,
+) -> dict[str, Any]:
+    clean_start = clean_report_date(start_date)
+    clean_end = clean_report_date(end_date)
+    if clean_start and clean_end and clean_start > clean_end:
+        clean_start, clean_end = clean_end, clean_start
+    raw_trades = []
+    if requested:
+        raw_trades = get_db().list_backtest_report_trades(
+            start_date=clean_start,
+            end_date=clean_end,
+            username=username,
+            limit=limit,
+        )
+    trades = [public_backtest_trade(trade) for trade in raw_trades]
+    return {
+        "type": "backtest_trade",
+        "label": "Backtest Trade Report",
+        "requested": requested,
+        "from_date": clean_start or "",
+        "to_date": clean_end or "",
+        "summary": trade_stats(trades),
+        "trades": trades,
+    }
+
+
+def is_report_requested(request: Request) -> bool:
+    return any(key in request.query_params for key in ("report_type", "from_date", "to_date"))
 
 
 def decode_jwt_payload(token: str | None) -> dict[str, Any]:
@@ -2136,7 +2191,13 @@ def logout() -> RedirectResponse:
 def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) -> HTMLResponse:
     trades = cached_trades(50)
     skipped = cached_skipped(50)
-    backtest_status = current_backtest_payload()
+    backtest_status = current_backtest_payload(user)
+    report = backtest_report_payload(
+        start_date=request.query_params.get("from_date"),
+        end_date=request.query_params.get("to_date"),
+        username=str(user["username"]),
+        requested=is_report_requested(request),
+    )
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -2147,6 +2208,7 @@ def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) ->
             "stats": trade_stats(trades),
             "active_trade_text": active_trade_text(trades),
             "latest_backtest": backtest_status["latest"],
+            "report": report,
         },
     )
 
@@ -2167,9 +2229,10 @@ async def backtest(
             if wants_json(request):
                 raise HTTPException(status_code=409, detail="A backtest is already running")
             return RedirectResponse("/dashboard", status_code=303)
-    run_id = get_db().create_backtest_run(clean_symbol, clean_start, clean_end)
+    run_id = get_db().create_backtest_run(clean_symbol, clean_start, clean_end, username=str(user["username"]))
     job = {
         "id": run_id,
+        "username": str(user["username"]),
         "symbol": clean_symbol,
         "start_date": clean_start,
         "end_date": clean_end,
@@ -2197,7 +2260,7 @@ async def backtest(
 
 @app.get("/api/backtest/latest")
 def api_latest_backtest(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    return current_backtest_payload()
+    return current_backtest_payload(user)
 
 
 @app.get("/api/user/broker/angel-one")
@@ -2213,8 +2276,8 @@ def api_user_broker_save(payload: BrokerProfilePayload, user: dict[str, Any] = D
         api_key=payload.api_key,
         pin=payload.pin,
         totp_secret=payload.totp_secret,
-        trading_enabled=bool(payload.trading_enabled),
-        lot_count=max(1, int(payload.lot_count or 1)),
+        trading_enabled=payload.trading_enabled,
+        lot_count=payload.lot_count,
     )
     runtime_cache_clear(f"user:{user['username']}")
     return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}
@@ -2235,6 +2298,53 @@ def api_user_broker_disconnect(user: dict[str, Any] = Depends(require_user)) -> 
     get_db().clear_user_angel_session(str(user["username"]))
     runtime_cache_clear(f"user:{user['username']}")
     return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}
+
+
+@app.get("/api/user/trading-engine")
+def api_user_trading_engine_status(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    broker = get_angel_execution().status(str(user["username"]))
+    return {"ok": True, "broker": broker, "enabled": bool(broker.get("trading_enabled"))}
+
+
+@app.post("/api/user/trading-engine")
+def api_user_trading_engine_save(payload: TradingEnginePayload, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    get_db().set_user_trading_enabled(str(user["username"]), bool(payload.enabled))
+    runtime_cache_clear(f"user:{user['username']}")
+    broker = get_angel_execution().status(str(user["username"]))
+    return {"ok": True, "broker": broker, "enabled": bool(broker.get("trading_enabled"))}
+
+
+@app.get("/api/user/lots")
+def api_user_lots_status(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    broker = get_angel_execution().status(str(user["username"]))
+    return {
+        "ok": True,
+        "lot_size_qty": int(broker.get("default_lot_size") or 1),
+        "lot_count": int(broker.get("lot_count") or 1),
+        "order_quantity": int(broker.get("order_quantity") or 1),
+    }
+
+
+@app.post("/api/user/lots")
+def api_user_lots_save(payload: UserLotPayload, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+    get_db().set_user_lot_count(str(user["username"]), max(1, int(payload.lot_count or 1)))
+    runtime_cache_clear(f"user:{user['username']}")
+    return api_user_lots_status(user)
+
+
+@app.get("/api/admin/execution/lot-size")
+def api_admin_execution_lot_size(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    lot_size_qty = get_angel_execution().default_lot_size()
+    return {"ok": True, "lot_size_qty": lot_size_qty}
+
+
+@app.post("/api/admin/execution/lot-size")
+def api_admin_execution_lot_size_save(
+    payload: ExecutionLotSizePayload,
+    user: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    lot_size_qty = get_db().set_execution_lot_size(max(1, int(payload.lot_size_qty or 1)))
+    return {"ok": True, "lot_size_qty": lot_size_qty}
 
 
 def render_admin(
@@ -2266,7 +2376,12 @@ def render_admin(
     }
     trades = cached_trades(100)
     skipped = cached_skipped(100)
-    backtest_status = current_backtest_payload()
+    backtest_status = current_backtest_payload(user)
+    report = backtest_report_payload(
+        start_date=request.query_params.get("from_date"),
+        end_date=request.query_params.get("to_date"),
+        requested=is_report_requested(request),
+    )
     candle_counts = cached_candle_counts("NIFTY")
     preflight = runtime_cache_get("admin-preflight", 15, admin_preflight, copy_value=True)
     return templates.TemplateResponse(
@@ -2283,6 +2398,7 @@ def render_admin(
             "trades": trades,
             "skipped": skipped,
             "latest_backtest": backtest_status["latest"],
+            "report": report,
             "stats": trade_stats(trades),
             "candle_counts": candle_counts,
             "preflight": preflight,

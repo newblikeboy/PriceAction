@@ -70,6 +70,7 @@ class SmartTradeEngine:
                 cached_zones = self._known_zones(all_rows, previous_close, break_row["datetime"], trading_date)
                 last_zone_refresh_index = int(break_index)
             zones = cached_zones
+            day_trend = self._day_trend(day_rows, int(break_index))
             for zone in zones:
                 direction = self._break_direction(zone, previous_close, float(break_row["close"]))
                 key = (zone.zone_id, direction, str(break_row["datetime"]))
@@ -92,6 +93,29 @@ class SmartTradeEngine:
                         skipped=skipped,
                     )
                     continue
+
+                continuation = self._trend_continuation_setup(zone, day_rows, int(break_index), day_trend)
+                if continuation is not None:
+                    setup_c, direction_c, entry_model_c = continuation
+                    cont_key = (zone.zone_id, setup_c, str(break_row["datetime"]))
+                    if cont_key not in seen:
+                        seen.add(cont_key)
+                        continuation_signal = self._build_signal(
+                            direction=direction_c,
+                            setup=setup_c,
+                            all_rows=all_rows,
+                            day_rows=day_rows,
+                            row_index=int(break_index),
+                            row=break_row,
+                            break_row=break_row,
+                            zone=zone,
+                            levels=levels,
+                            atr=atr,
+                            entry_model=entry_model_c,
+                            htf_context=(htf_contexts or {}).get(int(break_index), {}),
+                            target_zones=zones,
+                        )
+                        self._append(continuation_signal, skipped, break_row, direction_c, setup_c, signals)
 
                 reaction = self._reaction_setup(zone, previous_close, break_row)
                 if reaction is None:
@@ -163,6 +187,7 @@ class SmartTradeEngine:
         signals.extend(self._candle_break_confirmations(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         signals.extend(self._candle_retest_confirmations(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         signals.extend(self._candle_reaction_holds(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
+        signals.extend(self._candle_trend_continuations(all_rows, day_rows, current_index, current_row, levels, htf_context or {}, skipped, seen))
         return self._dedupe(signals), skipped
 
     def _candle_sweep_reclaim_displacements(
@@ -356,6 +381,51 @@ class SmartTradeEngine:
             self._append(signal, skipped, current_row, direction, setup, out)
         return out
 
+    def _candle_trend_continuations(
+        self,
+        all_rows: pd.DataFrame,
+        day_rows: pd.DataFrame,
+        current_index: int,
+        current_row: pd.Series,
+        levels: LevelSet,
+        htf_context: dict[str, Any],
+        skipped: list[SkippedSignal],
+        seen: set[tuple[str, str, str]],
+    ) -> list[SignalCandidate]:
+        out: list[SignalCandidate] = []
+        if not self.cfg.smart_trade_continuation_enabled:
+            return out
+        zones, atr = self._event_snapshot(all_rows, day_rows, current_index)
+        if not zones:
+            return out
+        day_trend = self._day_trend(day_rows, current_index)
+        for zone in zones:
+            continuation = self._trend_continuation_setup(zone, day_rows, current_index, day_trend)
+            if continuation is None:
+                continue
+            setup, direction, entry_model = continuation
+            key = (zone.zone_id, setup, str(current_row["datetime"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            signal = self._build_signal(
+                direction=direction,
+                setup=setup,
+                all_rows=all_rows,
+                day_rows=day_rows,
+                row_index=current_index,
+                row=current_row,
+                break_row=current_row,
+                zone=zone,
+                levels=levels,
+                atr=atr,
+                entry_model=entry_model,
+                htf_context=htf_context,
+                target_zones=zones,
+            )
+            self._append(signal, skipped, current_row, direction, setup, out)
+        return out
+
     def _handle_break_setup(
         self,
         *,
@@ -495,6 +565,41 @@ class SmartTradeEngine:
             if previous_close <= zone.high and close < zone.low and bearish:
                 return ("SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION", "PE", "resistance_rejection")
         return None
+
+    def _trend_continuation_setup(
+        self,
+        zone: SmartZone,
+        day_rows: pd.DataFrame,
+        confirm_index: int,
+        trend: str,
+    ) -> tuple[str, str, str] | None:
+        """Pullback continuation: in an established trend, price pulls back into a
+        with-trend zone then resumes in the trend direction on the confirm candle."""
+        if not self.cfg.smart_trade_continuation_enabled:
+            return None
+        if confirm_index < 1 or trend not in {"up", "down"}:
+            return None
+        confirm_row = day_rows.iloc[confirm_index]
+        close = float(confirm_row["close"])
+        open_price = float(confirm_row["open"])
+        lookback = max(1, int(getattr(self.cfg, "smart_trade_continuation_pullback_lookback", 4) or 4))
+        start = max(0, confirm_index - lookback)
+        window = day_rows.iloc[start : confirm_index + 1]
+        touched = bool(((window["low"] <= zone.high) & (window["high"] >= zone.low)).any())
+        if not touched:
+            return None
+        if self._is_support(zone) and trend == "up" and close > open_price and close > zone.low:
+            return ("SMART_ZONE_TREND_CONTINUATION", "CE", "trend_continuation")
+        if self._is_resistance(zone) and trend == "down" and close < open_price and close < zone.high:
+            return ("SMART_ZONE_TREND_CONTINUATION", "PE", "trend_continuation")
+        return None
+
+    def _day_trend(self, day_rows: pd.DataFrame, index: int) -> str:
+        if index < 1 or day_rows.empty:
+            return "range"
+        candles = day_rows.set_index("datetime").sort_index()
+        bounded = min(int(index), len(candles) - 1)
+        return self.structure.trend(candles, bounded)
 
     def _sweep_reclaim_displacement_setup(self, zone: SmartZone, row: pd.Series, atr: float) -> tuple[str, str, str] | None:
         if not self._is_displacement_reclaim(row, atr):
@@ -667,6 +772,28 @@ class SmartTradeEngine:
                 "entry_model": entry_model,
                 "structure_shift": structure,
             }
+        if setup == "SMART_ZONE_TREND_CONTINUATION":
+            if float(zone.score) < float(self.cfg.smart_trade_continuation_min_zone_score):
+                return None, "Trend continuation zone quality below required score", {
+                    "zone": zone.to_dict(),
+                    "zone_score": round(float(zone.score), 2),
+                    "required_zone_score": round(float(self.cfg.smart_trade_continuation_min_zone_score), 2),
+                    "entry_model": entry_model,
+                }
+            if structure.get("is_structure_break") and structure.get("direction") not in {None, expected}:
+                return None, "Trend continuation conflicts with market structure", {
+                    "zone": zone.to_dict(),
+                    "entry_model": entry_model,
+                    "structure_shift": structure,
+                }
+            htf_bias_value = htf_context.get("bias")
+            htf_aligned = (direction == "CE" and htf_bias_value == "bullish") or (direction == "PE" and htf_bias_value == "bearish")
+            if not htf_aligned:
+                return None, "Trend continuation needs aligned HTF bias", {
+                    "zone": zone.to_dict(),
+                    "htf_bias": htf_context,
+                    "entry_model": entry_model,
+                }
         score = self._score(setup, direction, row, zone, disp, structure, fvg_context, pd_context, htf_context, rr, risk, atr)
         if score < self.cfg.min_setup_score:
             return None, f"Smart-zone setup score below {self.cfg.min_setup_score}", {"zone": zone.to_dict(), "score": score, "entry_model": entry_model}
@@ -873,7 +1000,7 @@ class SmartTradeEngine:
             score += 8
         if setup == "SMART_ZONE_RETEST_CONFIRMATION":
             score += self.cfg.smart_trade_retest_score_bonus
-        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}:
+        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION", "SMART_ZONE_TREND_CONTINUATION"}:
             score += 6
         if row["close"] > row["open"] if direction == "CE" else row["close"] < row["open"]:
             score += 8

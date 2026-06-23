@@ -131,7 +131,6 @@ class StrategyConfig:
     option_score_otm_min: int = 88
     option_selection_strikecount: int = 11
     option_selection_min_ltp: float = 1.0
-    legacy_signal_setups_enabled: bool = False
     smart_min_zone_width_points: float = 15.0
     smart_max_zone_width_points: float = 80.0
     smart_cluster_atr_multiplier: float = 0.6
@@ -170,6 +169,10 @@ class StrategyConfig:
     smart_trade_counter_pd_min_zone_score: float = 78.0
     smart_trade_reaction_requires_hold: bool = False
     smart_trade_min_forward_space_width_ratio: float = 0.10
+    # Trend continuation: buy/sell the pullback into a with-trend zone while the trend is intact.
+    smart_trade_continuation_enabled: bool = True
+    smart_trade_continuation_pullback_lookback: int = 4
+    smart_trade_continuation_min_zone_score: float = 65.0
     # TEMP strong-zone experiment: remove these three fields and the matching TEMP checks in levels.py to revert.
     smart_temp_strong_move_zone_enabled: bool = False
     smart_temp_strong_move_points: float = 100.0
