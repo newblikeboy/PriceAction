@@ -290,7 +290,7 @@ def test_trend_continuation_detects_bullish_pullback() -> None:
     zone = _zone("swing_low+breakout_base", 100, 120, score=90)
     rows = [
         _candle(pd.Timestamp("2024-01-01 09:15"), 122, 126, 121, 124),
-        _candle(pd.Timestamp("2024-01-01 09:20"), 110, 122, 103, 118),
+        _candle(pd.Timestamp("2024-01-01 09:20"), 105, 120, 103, 118),
     ]
     frame = pd.DataFrame(rows)
     frame["date"] = frame["datetime"].dt.date
@@ -307,6 +307,23 @@ def test_trend_continuation_detects_bullish_pullback() -> None:
     assert engine._trend_continuation_setup(zone, day_rows, confirm_index, "range") is None
     disabled = SmartTradeEngine(_test_config_with(smart_trade_continuation_enabled=False))
     assert disabled._trend_continuation_setup(zone, day_rows, confirm_index, "up") is None
+
+
+def test_trend_continuation_rejects_limp_resume_candle() -> None:
+    # Filter B: a doji/limp resume candle (body% below threshold) must not qualify.
+    engine = SmartTradeEngine(_test_config())
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    rows = [
+        _candle(pd.Timestamp("2024-01-01 09:15"), 122, 126, 121, 124),
+        _candle(pd.Timestamp("2024-01-01 09:20"), 110, 122, 103, 112),  # body 2 / range 19 = 0.11
+    ]
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["datetime"].dt.date
+    frame["time"] = frame["datetime"].dt.strftime("%H:%M")
+    day_rows = engine._rows(frame)
+    confirm_index = len(day_rows) - 1
+
+    assert engine._trend_continuation_setup(zone, day_rows, confirm_index, "up") is None
 
 
 def test_trend_continuation_requires_aligned_htf() -> None:
@@ -361,7 +378,7 @@ def test_trend_continuation_emits_with_aligned_htf() -> None:
         levels=levels,
         atr=10,
         entry_model="trend_continuation",
-        htf_context={"enabled": True, "bias": "bullish", "reason": "test"},
+        htf_context=_aligned_htf("bullish"),
         target_zones=[zone],
     )
 
@@ -370,6 +387,75 @@ def test_trend_continuation_emits_with_aligned_htf() -> None:
     assert signal.setup_type == "SMART_ZONE_TREND_CONTINUATION"
     assert signal.direction == "CE"
     assert signal.features["entry_model"] == "trend_continuation"
+
+
+def test_trend_continuation_blocks_counter_premium_discount() -> None:
+    # Filter A: a CE continuation in premium (counter-PD) must be blocked.
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
+    candles = _breakout_candles(include_retest=False)
+    levels = _short_premium_levels()
+    all_rows = engine._rows(candles)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
+
+    signal, reason, _ = engine._build_signal(
+        direction="CE",
+        setup="SMART_ZONE_TREND_CONTINUATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=levels,
+        atr=10,
+        entry_model="trend_continuation",
+        htf_context=_aligned_htf("bullish"),
+        target_zones=[zone],
+    )
+
+    assert signal is None
+    assert reason == "Trend continuation is against premium/discount context"
+
+
+def test_trend_continuation_requires_both_htf_timeframes() -> None:
+    # Filter C: combined bias bullish but 15m neutral must be blocked.
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
+    candles = _breakout_candles(include_retest=False)
+    levels = _levels()
+    all_rows = engine._rows(candles)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
+
+    half_aligned = {
+        "enabled": True,
+        "bias": "bullish",
+        "reason": "60m directional, 15m neutral",
+        "15m": {"bias": "neutral"},
+        "60m": {"bias": "bullish"},
+    }
+    signal, reason, _ = engine._build_signal(
+        direction="CE",
+        setup="SMART_ZONE_TREND_CONTINUATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=levels,
+        atr=10,
+        entry_model="trend_continuation",
+        htf_context=half_aligned,
+        target_zones=[zone],
+    )
+
+    assert signal is None
+    assert reason == "Trend continuation needs 15m and 60m HTF both aligned"
 
 
 def test_signal_engine_is_smart_zone_only() -> None:
@@ -405,6 +491,16 @@ def _test_config() -> StrategyConfig:
 def _test_config_with(**overrides) -> StrategyConfig:
     base = _test_config()
     return replace(base, **overrides)
+
+
+def _aligned_htf(bias: str) -> dict:
+    return {
+        "enabled": True,
+        "bias": bias,
+        "reason": "15m and 60m aligned",
+        "15m": {"bias": bias},
+        "60m": {"bias": bias},
+    }
 
 
 def _history_rows(timestamps: list[str]) -> pd.DataFrame:

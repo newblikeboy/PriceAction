@@ -588,6 +588,12 @@ class SmartTradeEngine:
         touched = bool(((window["low"] <= zone.high) & (window["high"] >= zone.low)).any())
         if not touched:
             return None
+        # Filter B: the resume candle must show conviction, not a doji/limp body.
+        candle_range = max(float(confirm_row["high"]) - float(confirm_row["low"]), 0.01)
+        body_pct = abs(close - open_price) / candle_range
+        min_body = float(getattr(self.cfg, "smart_trade_continuation_min_resume_body_pct", 0.0) or 0.0)
+        if body_pct < min_body:
+            return None
         if self._is_support(zone) and trend == "up" and close > open_price and close > zone.low:
             return ("SMART_ZONE_TREND_CONTINUATION", "CE", "trend_continuation")
         if self._is_resistance(zone) and trend == "down" and close < open_price and close < zone.high:
@@ -786,6 +792,13 @@ class SmartTradeEngine:
                     "entry_model": entry_model,
                     "structure_shift": structure,
                 }
+            # Filter A: never take a continuation against premium/discount context.
+            if self.cfg.smart_trade_continuation_block_counter_pd and counter_pd:
+                return None, "Trend continuation is against premium/discount context", {
+                    "zone": zone.to_dict(),
+                    "entry_model": entry_model,
+                    "premium_discount": pd_context,
+                }
             htf_bias_value = htf_context.get("bias")
             htf_aligned = (direction == "CE" and htf_bias_value == "bullish") or (direction == "PE" and htf_bias_value == "bearish")
             if not htf_aligned:
@@ -794,6 +807,17 @@ class SmartTradeEngine:
                     "htf_bias": htf_context,
                     "entry_model": entry_model,
                 }
+            # Filter C: require 15m AND 60m HTF both aligned, not just the combined bias.
+            if self.cfg.smart_trade_continuation_require_both_htf:
+                expected_bias = "bullish" if direction == "CE" else "bearish"
+                tf15 = (htf_context.get("15m") or {}).get("bias")
+                tf60 = (htf_context.get("60m") or {}).get("bias")
+                if tf15 != expected_bias or tf60 != expected_bias:
+                    return None, "Trend continuation needs 15m and 60m HTF both aligned", {
+                        "zone": zone.to_dict(),
+                        "htf_bias": htf_context,
+                        "entry_model": entry_model,
+                    }
         score = self._score(setup, direction, row, zone, disp, structure, fvg_context, pd_context, htf_context, rr, risk, atr)
         if score < self.cfg.min_setup_score:
             return None, f"Smart-zone setup score below {self.cfg.min_setup_score}", {"zone": zone.to_dict(), "score": score, "entry_model": entry_model}

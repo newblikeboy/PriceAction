@@ -173,6 +173,12 @@ class StrategyConfig:
     smart_trade_continuation_enabled: bool = True
     smart_trade_continuation_pullback_lookback: int = 4
     smart_trade_continuation_min_zone_score: float = 65.0
+    # Quality filters (added after March-2026 loss review of this setup):
+    # A) never fight premium/discount, B) the resume candle must show conviction,
+    # C) require 15m AND 60m HTF both aligned (not just the combined bias).
+    smart_trade_continuation_block_counter_pd: bool = True
+    smart_trade_continuation_min_resume_body_pct: float = 0.5
+    smart_trade_continuation_require_both_htf: bool = True
     # TEMP strong-zone experiment: remove these three fields and the matching TEMP checks in levels.py to revert.
     smart_temp_strong_move_zone_enabled: bool = False
     smart_temp_strong_move_points: float = 100.0
