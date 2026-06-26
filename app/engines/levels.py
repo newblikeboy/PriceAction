@@ -199,16 +199,15 @@ class LevelEngine:
         filtered: list[SmartZone] = []
         for zone in zones:
             width = zone.high - zone.low
-            temp_strong_move_zone = self._is_temp_strong_move_zone(zone)
             too_old = False
             if latest_time is not None:
                 reference = zone.last_touched_at or zone.created_at
                 too_old = self._trading_day_age(reference, latest_time) > self.cfg.smart_max_age_days_without_touch
-            if zone.score < self.cfg.smart_min_zone_score and not temp_strong_move_zone:
+            if zone.score < self.cfg.smart_min_zone_score:
                 continue
             if zone.break_count > self.cfg.smart_max_allowed_breaks:
                 continue
-            if zone.reaction_count <= 0 and zone.reaction_score < 40 and not temp_strong_move_zone:
+            if zone.reaction_count <= 0 and zone.reaction_score < 40:
                 continue
             if abs(zone.midpoint - current_price) > max_distance:
                 continue
@@ -733,9 +732,6 @@ class LevelEngine:
         reaction_score = self._reaction_score(after, low, high, direction, atr)
         speed_score = self._speed_score(after, low, high, direction, atr)
         reaction_move_points = self._reaction_move_points(after, low, high, direction)
-        temp_strong_move_zone = self._is_temp_strong_move_points(reaction_move_points)
-        if temp_strong_move_zone:
-            reaction_score = max(reaction_score, 100.0)
         touch_quality_score = self._touch_quality_score(touch_count, reaction_count, break_count, crossed_count)
         if touch_count == 0:
             freshness_score = 100.0
@@ -781,9 +777,6 @@ class LevelEngine:
             noise_penalty=noise_penalty,
         )
         notes = list(raw.get("notes") or [])
-        if temp_strong_move_zone:
-            score = max(score, float(self.cfg.smart_temp_strong_move_min_score))
-            notes.append(f"TEMP strong move zone: price moved {round(reaction_move_points, 2)} points away")
         return SmartZone(
             zone_id=self._zone_id(str(raw["zone_type"]), low, high, created_at),
             zone_type=str(raw["zone_type"]),
@@ -1091,17 +1084,6 @@ class LevelEngine:
         total -= float(scores.get("noise_penalty", 0.0))
         return round(self._clamp(total), 2)
 
-    def _is_temp_strong_move_points(self, reaction_move_points: float) -> bool:
-        return (
-            bool(getattr(self.cfg, "smart_temp_strong_move_zone_enabled", False))
-            and float(reaction_move_points) >= float(getattr(self.cfg, "smart_temp_strong_move_points", 100.0))
-        )
-
-    def _is_temp_strong_move_zone(self, zone: SmartZone) -> bool:
-        return bool(getattr(self.cfg, "smart_temp_strong_move_zone_enabled", False)) and any(
-            str(note).startswith("TEMP strong move zone:") for note in zone.notes
-        )
-
     def _result(self, zones: list[SmartZone], current_price: float, atr: float, rows: pd.DataFrame) -> SmartLevelResult:
         supports = [
             zone
@@ -1170,8 +1152,6 @@ class LevelEngine:
             "noise_penalty": min(zone.noise_penalty for zone in zones),
         }
         score = self._final_score(**merged_scores)
-        if any(self._is_temp_strong_move_zone(zone) for zone in zones):
-            score = max(score, float(self.cfg.smart_temp_strong_move_min_score))
         return SmartZone(
             zone_id=parent.zone_id,
             zone_type=zone_types,

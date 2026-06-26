@@ -588,12 +588,6 @@ class SmartTradeEngine:
         touched = bool(((window["low"] <= zone.high) & (window["high"] >= zone.low)).any())
         if not touched:
             return None
-        # Filter B: the resume candle must show conviction, not a doji/limp body.
-        candle_range = max(float(confirm_row["high"]) - float(confirm_row["low"]), 0.01)
-        body_pct = abs(close - open_price) / candle_range
-        min_body = float(getattr(self.cfg, "smart_trade_continuation_min_resume_body_pct", 0.0) or 0.0)
-        if body_pct < min_body:
-            return None
         if self._is_support(zone) and trend == "up" and close > open_price and close > zone.low:
             return ("SMART_ZONE_TREND_CONTINUATION", "CE", "trend_continuation")
         if self._is_resistance(zone) and trend == "down" and close < open_price and close < zone.high:
@@ -627,13 +621,6 @@ class SmartTradeEngine:
         min_body = float(getattr(self.cfg, "smart_trade_sweep_reclaim_min_body_pct", 0.55) or 0.55)
         min_range_atr = float(getattr(self.cfg, "smart_trade_sweep_reclaim_min_range_atr", 1.0) or 1.0)
         return body_pct >= min_body and candle_range >= max(float(atr), 1.0) * min_range_atr
-
-    def _is_a_plus_rejection_zone(self, zone: SmartZone) -> bool:
-        return (
-            float(zone.score) >= float(getattr(self.cfg, "smart_trade_rejection_override_min_zone_score", 85.0) or 85.0)
-            and zone.status in {"fresh", "tested", "active"}
-            and zone.break_count <= 1
-        )
 
     def _confirmation_index(self, rows: pd.DataFrame, break_index: int, zone: SmartZone, direction: str) -> int | None:
         end = min(len(rows), break_index + 1 + self.cfg.smart_trade_confirmation_window_candles)
@@ -698,14 +685,8 @@ class SmartTradeEngine:
             return None, "Invalid smart-zone SL", {"zone": zone.to_dict(), "entry_model": entry_model}
         if risk > self.cfg.max_entry_sl_points:
             return None, "Smart-zone entry is too far from SL", {"zone": zone.to_dict(), "risk_points": round(risk, 2), "entry_model": entry_model}
-        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"} and float(zone.score) < float(self.cfg.smart_trade_reaction_min_zone_score):
-            return None, "Smart-zone reaction quality below required zone score", {
-                "zone": zone.to_dict(),
-                "zone_score": round(float(zone.score), 2),
-                "required_zone_score": round(float(self.cfg.smart_trade_reaction_min_zone_score), 2),
-                "entry_model": entry_model,
-            }
-
+        # Zone quality is already enforced uniformly upstream (every zone passed in
+        # clears smart_trade_min_zone_score), so no per-setup zone-score gate here.
         target = self._target(entry, direction, target_zones, zone, levels, min_reward=risk * self.cfg.minimum_rr)
         if target is None:
             return None, "No smart-zone or liquidity target ahead", {"zone": zone.to_dict(), "entry_model": entry_model}
@@ -714,129 +695,31 @@ class SmartTradeEngine:
         if rr < self.cfg.minimum_rr:
             return None, f"RR below 1:{self.cfg.minimum_rr:g}", {"zone": zone.to_dict(), "target": target, "risk_points": round(risk, 2), "reward_points": round(reward, 2), "entry_model": entry_model}
 
-        freshness_reason = self._freshness_filter_reason(setup, zone)
-        if freshness_reason:
-            freshness = zone.enhancers.get("freshness") if isinstance(zone.enhancers, dict) else None
-            return None, freshness_reason, {
-                "zone": zone.to_dict(),
-                "freshness_points": round(float((freshness or {}).get("points") or 0), 2) if isinstance(freshness, dict) else None,
-                "required_freshness": round(float(self.cfg.smart_temp_min_freshness_enhancer), 2),
-                "entry_model": entry_model,
-            }
-
-        forward_space_reason = self._forward_space_filter_reason(setup, zone)
-        if forward_space_reason:
-            risk_reward_space = (zone.enhancers or {}).get("risk_reward_space") if isinstance(zone.enhancers, dict) else None
-            return None, forward_space_reason, {
-                "zone": zone.to_dict(),
-                "risk_reward_space": risk_reward_space,
-                "required_space_width_ratio": round(float(getattr(self.cfg, "smart_trade_min_forward_space_width_ratio", 0.0) or 0.0), 2),
-                "entry_model": entry_model,
-            }
-
         candles = day_rows.set_index("datetime").sort_index()
         disp = self.displacement.analyze(candles, row_index)
         structure = self.structure.structure_shift(candles, row_index)
         fvg_context = self.fvg.context(candles, row_index, direction)
         pd_context = self.premium_discount.context(levels, entry)
-        expected = "bullish" if direction == "CE" else "bearish"
-        counter_pd = (direction == "CE" and pd_context.get("zone") == "premium") or (direction == "PE" and pd_context.get("zone") == "discount")
-        has_directional_structure = bool(structure.get("direction") == expected and structure.get("is_structure_break"))
-        has_unmitigated_directional_fvg = bool(
-            fvg_context.get("present")
-            and not fvg_context.get("fully_mitigated")
-            and fvg_context.get("direction") == expected
-        )
-        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}:
-            if counter_pd:
-                return None, "Premium/discount context is against this smart-zone reaction", {
-                    "zone": zone.to_dict(),
-                    "entry_model": entry_model,
-                    "premium_discount": pd_context,
-                }
-            if not (has_directional_structure or has_unmitigated_directional_fvg):
-                return None, "Reaction lacks structure shift or unmitigated directional FVG", {
-                    "zone": zone.to_dict(),
-                    "entry_model": entry_model,
-                    "structure_shift": structure,
-                    "fair_value_gap": fvg_context,
-                }
-        if setup == "SMART_ZONE_BREAK_CONFIRMATION" and counter_pd and not has_directional_structure:
-            return None, "Counter-PD zone break needs structure confirmation", {
+        # HTF bias is a single hard gate applied identically to every setup: never
+        # trade directly against the higher-timeframe bias (neutral is allowed).
+        # No per-setup overrides or escape hatches.
+        if not self.htf_bias.allows(direction, htf_context):
+            return None, "HTF bias filter blocked smart-zone setup", {
                 "zone": zone.to_dict(),
+                "htf_bias": htf_context,
                 "entry_model": entry_model,
-                "premium_discount": pd_context,
-                "structure_shift": structure,
             }
-        if (
-            setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION"}
-            and structure.get("is_structure_break")
-            and structure.get("direction") not in {None, expected}
-        ):
-            return None, "Reaction confirmation conflicts with market structure", {
-                "zone": zone.to_dict(),
-                "entry_model": entry_model,
-                "structure_shift": structure,
-            }
-        if setup == "SMART_ZONE_TREND_CONTINUATION":
-            if float(zone.score) < float(self.cfg.smart_trade_continuation_min_zone_score):
-                return None, "Trend continuation zone quality below required score", {
-                    "zone": zone.to_dict(),
-                    "zone_score": round(float(zone.score), 2),
-                    "required_zone_score": round(float(self.cfg.smart_trade_continuation_min_zone_score), 2),
-                    "entry_model": entry_model,
-                }
-            if structure.get("is_structure_break") and structure.get("direction") not in {None, expected}:
-                return None, "Trend continuation conflicts with market structure", {
-                    "zone": zone.to_dict(),
-                    "entry_model": entry_model,
-                    "structure_shift": structure,
-                }
-            # Filter A: never take a continuation against premium/discount context.
-            if self.cfg.smart_trade_continuation_block_counter_pd and counter_pd:
-                return None, "Trend continuation is against premium/discount context", {
-                    "zone": zone.to_dict(),
-                    "entry_model": entry_model,
-                    "premium_discount": pd_context,
-                }
-            htf_bias_value = htf_context.get("bias")
-            htf_aligned = (direction == "CE" and htf_bias_value == "bullish") or (direction == "PE" and htf_bias_value == "bearish")
-            if not htf_aligned:
-                return None, "Trend continuation needs aligned HTF bias", {
-                    "zone": zone.to_dict(),
-                    "htf_bias": htf_context,
-                    "entry_model": entry_model,
-                }
-            # Filter C: require 15m AND 60m HTF both aligned, not just the combined bias.
-            if self.cfg.smart_trade_continuation_require_both_htf:
-                expected_bias = "bullish" if direction == "CE" else "bearish"
-                tf15 = (htf_context.get("15m") or {}).get("bias")
-                tf60 = (htf_context.get("60m") or {}).get("bias")
-                if tf15 != expected_bias or tf60 != expected_bias:
-                    return None, "Trend continuation needs 15m and 60m HTF both aligned", {
-                        "zone": zone.to_dict(),
-                        "htf_bias": htf_context,
-                        "entry_model": entry_model,
-                    }
+
+        # Quality is one uniform confluence threshold for all setups. Weak setups
+        # (e.g. a reaction with no structure, or a counter-PD entry) simply score
+        # low here and fail the same gate, instead of bespoke per-setup blocks.
         score = self._score(setup, direction, row, zone, disp, structure, fvg_context, pd_context, htf_context, rr, risk, atr)
         if score < self.cfg.min_setup_score:
-            return None, f"Smart-zone setup score below {self.cfg.min_setup_score}", {"zone": zone.to_dict(), "score": score, "entry_model": entry_model}
-        if setup == "SMART_ZONE_RETEST_CONFIRMATION" and score < int(getattr(self.cfg, "smart_trade_retest_min_score", self.cfg.min_setup_score) or self.cfg.min_setup_score):
-            return None, "Smart-zone retest setup score below retest threshold", {
+            return None, f"Smart-zone confluence score below {self.cfg.min_setup_score}", {
                 "zone": zone.to_dict(),
                 "score": score,
-                "required_score": int(getattr(self.cfg, "smart_trade_retest_min_score", self.cfg.min_setup_score) or self.cfg.min_setup_score),
                 "entry_model": entry_model,
             }
-        pd_reason = self._counter_pd_rejection_reason(direction, setup, score, zone, pd_context)
-        if pd_reason:
-            return None, pd_reason, {"zone": zone.to_dict(), "score": score, "entry_model": entry_model, "premium_discount": pd_context}
-        htf_overridden = False
-        if not self.htf_bias.allows(direction, htf_context):
-            if self._allows_htf_override(setup, score, zone):
-                htf_overridden = True
-            else:
-                return None, "HTF bias filter blocked smart-zone setup", {"zone": zone.to_dict(), "htf_bias": htf_context, "score": score, "entry_model": entry_model}
 
         entry_datetime = pd.to_datetime(row["datetime"]) + pd.Timedelta(minutes=5)
         features = {
@@ -875,7 +758,6 @@ class SmartTradeEngine:
             "PD_valid": pd_context.get("valid"),
             "HTF_bias": htf_context.get("bias"),
             "HTF_bias_reason": htf_context.get("reason"),
-            "HTF_override": htf_overridden,
             "reason_for_entry": {
                 "zone": zone.to_dict(),
                 "zone_enhancers": zone.enhancers,
@@ -884,7 +766,6 @@ class SmartTradeEngine:
                 "entry_model": entry_model,
                 "target": target,
                 "htf_bias": htf_context,
-                "htf_override": htf_overridden,
                 "premium_discount": pd_context,
                 "fair_value_gap": fvg_context,
                 "structure_shift": structure,
@@ -1015,52 +896,42 @@ class SmartTradeEngine:
         risk: float,
         atr: float,
     ) -> int:
+        """Equal-weighted confluence score: the fraction of independent structural
+        confirmations that are present, scaled to 0-100. No hand-tuned weights or
+        per-setup bonuses, so the same evidence is worth the same for every setup.
+
+        ``risk``/``atr``/``setup`` are accepted for signature stability but are not
+        used; risk geometry is already enforced by the RR and SL gates upstream.
+        """
         expected = "bullish" if direction == "CE" else "bearish"
-        score = 22 + int(zone.score * 0.35)
-        zone_tags = {tag for tag in zone.zone_type.split("+")}
-        if zone_tags & {"order_block_bullish", "order_block_bearish"}:
-            score += 6
-        if zone_tags & {"bullish_breaker", "bearish_breaker"}:
-            score += 8
-        if setup == "SMART_ZONE_RETEST_CONFIRMATION":
-            score += self.cfg.smart_trade_retest_score_bonus
-        if setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION", "SMART_ZONE_TREND_CONTINUATION"}:
-            score += 6
-        if row["close"] > row["open"] if direction == "CE" else row["close"] < row["open"]:
-            score += 8
-        if disp.get("direction") == expected:
-            score += 12
-        elif float(disp.get("body_pct") or 0) >= 0.45:
-            score += 5
-        if structure.get("direction") == expected:
-            score += 10 if structure.get("is_bos") else 7
-            if structure.get("is_mss") or structure.get("is_choch"):
-                score += 4
-        if fvg_context.get("present") and not fvg_context.get("fully_mitigated"):
-            score += 5
         pd_zone = pd_context.get("zone")
-        if (direction == "CE" and pd_zone == "discount") or (direction == "PE" and pd_zone == "premium"):
-            score += 5
-        elif pd_zone == "equilibrium":
-            score += 2
-        else:
-            score -= 3
-        htf_bias = htf_context.get("bias")
-        if htf_bias == direction:
-            score += 6
-        elif htf_bias not in {None, "neutral", direction}:
-            score -= 8
-        if rr >= 3:
-            score += 11
-        elif rr >= 2:
-            score += 8
-        else:
-            score += 5
-        if 0 < risk <= max(atr, 1.0):
-            score += 5
-        elif 0 < risk <= self.cfg.max_entry_sl_points * 0.6:
-            score += 2
-        return max(0, min(100, int(score)))
+        confirm_in_direction = (
+            float(row["close"]) > float(row["open"]) if direction == "CE" else float(row["close"]) < float(row["open"])
+        )
+        factors = [
+            # 1. confirmation candle closes in the trade direction
+            bool(confirm_in_direction),
+            # 2. displacement is aligned with the trade
+            disp.get("direction") == expected,
+            # 3. market structure broke in the trade direction
+            bool(structure.get("is_structure_break") and structure.get("direction") == expected),
+            # 4. an unmitigated directional fair-value gap supports the move
+            bool(
+                fvg_context.get("present")
+                and not fvg_context.get("fully_mitigated")
+                and fvg_context.get("direction") == expected
+            ),
+            # 5. entering from the favourable side of premium/discount
+            (direction == "CE" and pd_zone == "discount") or (direction == "PE" and pd_zone == "premium"),
+            # 6. the zone is fresh (barely touched)
+            zone.touch_count <= 1,
+            # 7. reward-to-risk is generous
+            rr >= 2.0,
+            # 8. the zone itself is high quality
+            float(zone.score) >= 70.0,
+        ]
+        satisfied = sum(1 for ok in factors if ok)
+        return int(round(100.0 * satisfied / len(factors)))
 
     def _append(self, result, skipped, row, direction, setup, signals) -> None:
         signal, reason, context = result
@@ -1068,74 +939,6 @@ class SmartTradeEngine:
             signals.append(signal)
         elif reason:
             skipped.append(self._skip(row, direction, setup, reason, context))
-
-    def _allows_htf_override(self, setup: str, score: int, zone: SmartZone) -> bool:
-        if setup not in {
-            "SMART_ZONE_BREAK_CONFIRMATION",
-            "SMART_ZONE_RETEST_CONFIRMATION",
-            "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION",
-            "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-        }:
-            return False
-        return (
-            score >= int(self.cfg.smart_trade_htf_override_min_score)
-            and float(zone.score) >= float(self.cfg.smart_trade_htf_override_min_zone_score)
-        )
-
-    def _counter_pd_rejection_reason(
-        self,
-        direction: str,
-        setup: str,
-        score: int,
-        zone: SmartZone,
-        pd_context: dict[str, Any],
-    ) -> str | None:
-        zone_name = pd_context.get("zone")
-        counter_context = (direction == "CE" and zone_name == "premium") or (direction == "PE" and zone_name == "discount")
-        if not counter_context:
-            return None
-        if (
-            score >= int(self.cfg.smart_trade_counter_pd_min_score)
-            and float(zone.score) >= float(self.cfg.smart_trade_counter_pd_min_zone_score)
-        ):
-            return None
-        return "Premium/discount context is against this smart-zone trade"
-
-    def _freshness_filter_reason(self, setup: str, zone: SmartZone) -> str | None:
-        if not bool(getattr(self.cfg, "smart_temp_freshness_filter_enabled", False)):
-            return None
-        if setup not in set(getattr(self.cfg, "smart_temp_freshness_filter_setups", ()) or ()):
-            return None
-        enhancers = zone.enhancers or {}
-        freshness = enhancers.get("freshness") if isinstance(enhancers, dict) else None
-        if not isinstance(freshness, dict):
-            return None
-        freshness_points = float(freshness.get("points") or 0)
-        required = float(getattr(self.cfg, "smart_temp_min_freshness_enhancer", 1.5) or 1.5)
-        if freshness_points >= required:
-            return None
-        return "Temporary freshness filter blocked smart-zone setup"
-
-    def _forward_space_filter_reason(self, setup: str, zone: SmartZone) -> str | None:
-        if setup not in {"SMART_ZONE_BREAK_CONFIRMATION", "SMART_ZONE_RETEST_CONFIRMATION"}:
-            return None
-        required = float(getattr(self.cfg, "smart_trade_min_forward_space_width_ratio", 0.0) or 0.0)
-        if required <= 0:
-            return None
-        enhancers = zone.enhancers or {}
-        risk_reward_space = enhancers.get("risk_reward_space") if isinstance(enhancers, dict) else None
-        if not isinstance(risk_reward_space, dict):
-            return None
-        ratio = risk_reward_space.get("space_width_ratio")
-        if ratio is None:
-            return None
-        try:
-            ratio_value = float(ratio)
-        except (TypeError, ValueError):
-            return None
-        if ratio_value >= required:
-            return None
-        return "Forward space to opposing zone is too compressed"
 
     @staticmethod
     def _is_one_shot_setup(setup: str) -> bool:

@@ -43,35 +43,6 @@ def test_smart_trade_history_uses_previous_two_trading_days() -> None:
     ]
 
 
-def test_temporary_freshness_filter_is_enabled_by_default() -> None:
-    cfg = StrategyConfig()
-
-    assert cfg.smart_temp_freshness_filter_enabled is True
-    assert cfg.smart_temp_min_freshness_enhancer == 1.5
-    assert "SMART_ZONE_RETEST_CONFIRMATION" in cfg.smart_temp_freshness_filter_setups
-    assert "SMART_ZONE_REJECTION_OVERRIDE" not in cfg.smart_temp_freshness_filter_setups
-
-
-def test_temporary_freshness_filter_blocks_only_configured_setups() -> None:
-    engine = SmartTradeEngine(_test_config())
-    zone = _zone("swing_high", 100, 120, score=90)
-    zone.enhancers = {"freshness": {"points": 1.0}, "total_points": 10.0, "max_points": 14.0}
-
-    assert engine._freshness_filter_reason("SMART_ZONE_RETEST_CONFIRMATION", zone) == "Temporary freshness filter blocked smart-zone setup"
-    assert engine._freshness_filter_reason("SMART_ZONE_REJECTION_OVERRIDE", zone) is None
-    assert engine._freshness_filter_reason("SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT", zone) is None
-
-
-def test_temporary_freshness_filter_allows_unknown_or_fresh_zones() -> None:
-    engine = SmartTradeEngine(_test_config())
-    unknown_zone = _zone("swing_high", 100, 120, score=90)
-    fresh_zone = _zone("swing_high", 100, 120, score=90)
-    fresh_zone.enhancers = {"freshness": {"points": 1.5}, "total_points": 10.0, "max_points": 14.0}
-
-    assert engine._freshness_filter_reason("SMART_ZONE_RETEST_CONFIRMATION", unknown_zone) is None
-    assert engine._freshness_filter_reason("SMART_ZONE_RETEST_CONFIRMATION", fresh_zone) is None
-
-
 def test_smart_trade_requires_break_plus_confirmation() -> None:
     zone = _zone("swing_high", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
@@ -104,22 +75,12 @@ def test_smart_trade_detects_retest_confirmation() -> None:
     signals, _ = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
 
     retest = next(item for item in signals if item.setup_type == "SMART_ZONE_RETEST_CONFIRMATION")
-    immediate = next(item for item in signals if item.setup_type == "SMART_ZONE_BREAK_CONFIRMATION")
+    # break-confirmation must also be present; both are scored by the same uniform
+    # confluence (no retest bonus), so we no longer assert one outscores the other.
+    assert any(item.setup_type == "SMART_ZONE_BREAK_CONFIRMATION" for item in signals)
     assert retest.time == "10:50"
     assert retest.features["entry_model"] == "break_confirm_retest"
-    assert retest.setup_score >= immediate.setup_score
-
-
-def test_smart_trade_blocks_support_reaction_without_structure_or_fvg() -> None:
-    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _support_reaction_candles()
-    levels = _wide_levels()
-
-    signals, skipped = engine.generate_for_day(candles, levels, pd.Timestamp("2024-01-01").date())
-
-    assert not [item for item in signals if item.setup_type == "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION"]
-    assert [item for item in skipped if item.skip_reason == "Reaction lacks structure shift or unmitigated directional FVG"]
+    assert 0 <= retest.setup_score <= 100
 
 
 def test_smart_trade_does_not_emit_removed_flip_retest_setup() -> None:
@@ -133,48 +94,19 @@ def test_smart_trade_does_not_emit_removed_flip_retest_setup() -> None:
     assert not [item for item in signals if item.setup_type == "SMART_ZONE_FLIP_RETEST_CONFIRMATION"]
 
 
-def test_smart_trade_blocks_reaction_without_structure_or_fvg_before_pd() -> None:
-    zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
+def test_htf_bias_hard_gate_blocks_trade_against_bias() -> None:
+    # HTF bias is now a single uniform hard gate (no per-setup override hatch):
+    # a CE setup with an opposing (bearish) HTF bias must be blocked.
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
     engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _resistance_rejection_candles()
-    levels = _invalid_pd_levels()
+    candles = _breakout_candles(include_retest=False)
+    levels = _levels()
     all_rows = engine._rows(candles)
     day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
     row_index = len(day_rows) - 1
     row = day_rows.iloc[row_index]
 
-    signal, reason, context = engine._build_signal(
-        direction="PE",
-        setup="SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="resistance_rejection",
-        htf_context={"enabled": True, "bias": "bearish", "reason": "test"},
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Reaction lacks structure shift or unmitigated directional FVG"
-    assert context["fair_value_gap"]["present"] is False
-
-
-def test_smart_trade_blocks_counter_pd_break_without_structure_confirmation() -> None:
-    zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _resistance_flipped_support_candles()
-    levels = _short_premium_levels()
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    signal, reason, context = engine._build_signal(
+    signal, reason, _ = engine._build_signal(
         direction="CE",
         setup="SMART_ZONE_BREAK_CONFIRMATION",
         all_rows=all_rows,
@@ -186,84 +118,12 @@ def test_smart_trade_blocks_counter_pd_break_without_structure_confirmation() ->
         levels=levels,
         atr=10,
         entry_model="break_confirmation",
-        htf_context={"enabled": True, "bias": "bullish", "reason": "test"},
+        htf_context={"enabled": True, "bias": "bearish", "reason": "opposing HTF"},
         target_zones=[zone],
     )
 
     assert signal is None
-    assert reason == "Counter-PD zone break needs structure confirmation"
-    assert context["premium_discount"]["zone"] == "premium"
-
-
-def test_smart_trade_blocks_compressed_forward_space() -> None:
-    zone = _zone("breakout_base+swing_low", 100, 120, score=90)
-    zone.enhancers = {"risk_reward_space": {"space_width_ratio": 0.07}}
-    engine = SmartTradeEngine(_test_config())
-
-    assert engine._forward_space_filter_reason("SMART_ZONE_BREAK_CONFIRMATION", zone) == "Forward space to opposing zone is too compressed"
-
-
-def test_smart_trade_blocks_low_score_retest() -> None:
-    zone = _zone("swing_low", 100, 120, score=74)
-    engine = SmartTradeEngine(_test_config())
-    candles = _resistance_flipped_support_candles()
-    levels = _short_premium_levels()
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    signal, reason, context = engine._build_signal(
-        direction="PE",
-        setup="SMART_ZONE_RETEST_CONFIRMATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="break_confirm_retest",
-        htf_context={"enabled": True, "bias": "bearish", "reason": "test"},
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Smart-zone retest setup score below retest threshold"
-    assert context["required_score"] == 75
-
-
-def test_smart_trade_blocks_weak_resistance_rejection_before_htf_override() -> None:
-    zone = _zone("breakdown_base+swing_high", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _resistance_rejection_candles()
-    levels = _invalid_pd_levels()
-    bullish_htf = {"enabled": True, "bias": "bullish", "reason": "test opposing HTF"}
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    signal, reason, context = engine._build_signal(
-        direction="PE",
-        setup="SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="resistance_rejection",
-        htf_context=bullish_htf,
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Reaction lacks structure shift or unmitigated directional FVG"
-    assert context["fair_value_gap"]["present"] is False
+    assert reason == "HTF bias filter blocked smart-zone setup"
 
 
 def test_smart_trade_does_not_emit_removed_sweep_reclaim_setup() -> None:
@@ -282,7 +142,6 @@ def test_trend_continuation_enabled_by_default() -> None:
 
     assert cfg.smart_trade_continuation_enabled is True
     assert cfg.smart_trade_continuation_pullback_lookback == 4
-    assert cfg.smart_trade_continuation_min_zone_score == 65.0
 
 
 def test_trend_continuation_detects_bullish_pullback() -> None:
@@ -307,53 +166,6 @@ def test_trend_continuation_detects_bullish_pullback() -> None:
     assert engine._trend_continuation_setup(zone, day_rows, confirm_index, "range") is None
     disabled = SmartTradeEngine(_test_config_with(smart_trade_continuation_enabled=False))
     assert disabled._trend_continuation_setup(zone, day_rows, confirm_index, "up") is None
-
-
-def test_trend_continuation_rejects_limp_resume_candle() -> None:
-    # Filter B: a doji/limp resume candle (body% below threshold) must not qualify.
-    engine = SmartTradeEngine(_test_config())
-    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
-    rows = [
-        _candle(pd.Timestamp("2024-01-01 09:15"), 122, 126, 121, 124),
-        _candle(pd.Timestamp("2024-01-01 09:20"), 110, 122, 103, 112),  # body 2 / range 19 = 0.11
-    ]
-    frame = pd.DataFrame(rows)
-    frame["date"] = frame["datetime"].dt.date
-    frame["time"] = frame["datetime"].dt.strftime("%H:%M")
-    day_rows = engine._rows(frame)
-    confirm_index = len(day_rows) - 1
-
-    assert engine._trend_continuation_setup(zone, day_rows, confirm_index, "up") is None
-
-
-def test_trend_continuation_requires_aligned_htf() -> None:
-    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _breakout_candles(include_retest=False)
-    levels = _levels()
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    signal, reason, _ = engine._build_signal(
-        direction="CE",
-        setup="SMART_ZONE_TREND_CONTINUATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="trend_continuation",
-        htf_context={"enabled": True, "bias": "neutral", "reason": "test"},
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Trend continuation needs aligned HTF bias"
 
 
 def test_trend_continuation_emits_with_aligned_htf() -> None:
@@ -389,75 +201,6 @@ def test_trend_continuation_emits_with_aligned_htf() -> None:
     assert signal.features["entry_model"] == "trend_continuation"
 
 
-def test_trend_continuation_blocks_counter_premium_discount() -> None:
-    # Filter A: a CE continuation in premium (counter-PD) must be blocked.
-    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _breakout_candles(include_retest=False)
-    levels = _short_premium_levels()
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    signal, reason, _ = engine._build_signal(
-        direction="CE",
-        setup="SMART_ZONE_TREND_CONTINUATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="trend_continuation",
-        htf_context=_aligned_htf("bullish"),
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Trend continuation is against premium/discount context"
-
-
-def test_trend_continuation_requires_both_htf_timeframes() -> None:
-    # Filter C: combined bias bullish but 15m neutral must be blocked.
-    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
-    engine = FixedZoneSmartTradeEngine(_test_config(), [zone])
-    candles = _breakout_candles(include_retest=False)
-    levels = _levels()
-    all_rows = engine._rows(candles)
-    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
-    row_index = len(day_rows) - 1
-    row = day_rows.iloc[row_index]
-
-    half_aligned = {
-        "enabled": True,
-        "bias": "bullish",
-        "reason": "60m directional, 15m neutral",
-        "15m": {"bias": "neutral"},
-        "60m": {"bias": "bullish"},
-    }
-    signal, reason, _ = engine._build_signal(
-        direction="CE",
-        setup="SMART_ZONE_TREND_CONTINUATION",
-        all_rows=all_rows,
-        day_rows=day_rows,
-        row_index=row_index,
-        row=row,
-        break_row=row,
-        zone=zone,
-        levels=levels,
-        atr=10,
-        entry_model="trend_continuation",
-        htf_context=half_aligned,
-        target_zones=[zone],
-    )
-
-    assert signal is None
-    assert reason == "Trend continuation needs 15m and 60m HTF both aligned"
-
-
 def test_signal_engine_is_smart_zone_only() -> None:
     cfg = StrategyConfig(
         smart_trade_enabled=False,
@@ -473,6 +216,49 @@ def test_signal_engine_is_smart_zone_only() -> None:
 
     assert signals == []
     assert skipped == []
+
+
+def test_confluence_score_is_normalized_fraction() -> None:
+    # The score is the fraction of 8 equal-weighted structural confirmations,
+    # scaled to 0-100. All present -> 100; none present -> 0; no hand-tuned weights.
+    engine = SmartTradeEngine(_test_config())
+
+    strong_zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    bull_row = pd.Series({"open": 100.0, "high": 110.0, "low": 99.0, "close": 109.0})
+    all_true = engine._score(
+        "SMART_ZONE_BREAK_CONFIRMATION",
+        "CE",
+        bull_row,
+        strong_zone,
+        {"direction": "bullish"},
+        {"is_structure_break": True, "direction": "bullish"},
+        {"present": True, "fully_mitigated": False, "direction": "bullish"},
+        {"zone": "discount"},
+        {"bias": "bullish"},
+        3.0,
+        10.0,
+        10.0,
+    )
+    assert all_true == 100
+
+    weak_zone = _zone("swing_high", 100, 120, score=10)
+    weak_zone.touch_count = 5
+    bear_row = pd.Series({"open": 109.0, "high": 110.0, "low": 99.0, "close": 100.0})
+    none_true = engine._score(
+        "SMART_ZONE_BREAK_CONFIRMATION",
+        "CE",
+        bear_row,
+        weak_zone,
+        {"direction": "bearish"},
+        {"is_structure_break": False, "direction": None},
+        {"present": False},
+        {"zone": "premium"},
+        {"bias": "bearish"},
+        1.0,
+        10.0,
+        10.0,
+    )
+    assert none_true == 0
 
 
 def _test_config() -> StrategyConfig:

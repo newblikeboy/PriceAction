@@ -149,49 +149,25 @@ class StrategyConfig:
     smart_recent_trading_days: int = 5
     smart_max_age_days_without_touch: int = 30
     smart_trade_enabled: bool = True
+    # Single zone-quality gate applied uniformly to every setup (no per-setup variants).
     smart_trade_min_zone_score: float = 60.0
+    # Structural windows (how far ahead to look for confirmation / retest).
     smart_trade_confirmation_window_candles: int = 2
     smart_trade_retest_window_candles: int = 8
-    smart_trade_retest_min_score: int = 75
+    # Risk geometry: don't chase a far break; structural SL buffer and inner-zone SL model.
     smart_trade_max_chase_atr: float = 1.5
     smart_trade_sl_atr_buffer: float = 0.20
     smart_trade_sl_zone_inner_fraction: float = 0.25
-    smart_trade_retest_score_bonus: int = 8
-    smart_trade_reaction_min_zone_score: float = 75.0
+    # Zone history / refresh cadence.
     smart_trade_zone_history_days: int = 2
     smart_trade_zone_refresh_candles: int = 12
-    smart_trade_htf_override_min_score: int = 75
-    smart_trade_htf_override_min_zone_score: float = 80.0
-    smart_trade_rejection_override_min_zone_score: float = 85.0
+    # Definition of a displacement (sweep-reclaim) candle: strong body, ATR-relative range.
     smart_trade_sweep_reclaim_min_body_pct: float = 0.55
     smart_trade_sweep_reclaim_min_range_atr: float = 1.0
-    smart_trade_counter_pd_min_score: int = 72
-    smart_trade_counter_pd_min_zone_score: float = 78.0
     smart_trade_reaction_requires_hold: bool = False
-    smart_trade_min_forward_space_width_ratio: float = 0.10
     # Trend continuation: buy/sell the pullback into a with-trend zone while the trend is intact.
     smart_trade_continuation_enabled: bool = True
     smart_trade_continuation_pullback_lookback: int = 4
-    smart_trade_continuation_min_zone_score: float = 65.0
-    # Quality filters (added after March-2026 loss review of this setup):
-    # A) never fight premium/discount, B) the resume candle must show conviction,
-    # C) require 15m AND 60m HTF both aligned (not just the combined bias).
-    smart_trade_continuation_block_counter_pd: bool = True
-    smart_trade_continuation_min_resume_body_pct: float = 0.5
-    smart_trade_continuation_require_both_htf: bool = True
-    # TEMP strong-zone experiment: remove these three fields and the matching TEMP checks in levels.py to revert.
-    smart_temp_strong_move_zone_enabled: bool = False
-    smart_temp_strong_move_points: float = 100.0
-    smart_temp_strong_move_min_score: float = 90.0
-    # TEMP freshness filter experiment: remove these fields and SmartTradeEngine._freshness_filter_reason to revert.
-    smart_temp_freshness_filter_enabled: bool = True
-    smart_temp_min_freshness_enhancer: float = 1.5
-    smart_temp_freshness_filter_setups: tuple[str, ...] = (
-        "SMART_ZONE_BREAK_CONFIRMATION",
-        "SMART_ZONE_RETEST_CONFIRMATION",
-        "SMART_ZONE_SUPPORT_REACTION_CONFIRMATION",
-        "SMART_ZONE_RESISTANCE_REJECTION_CONFIRMATION",
-    )
     paper_breakeven_after_r: float = 1.0
     paper_profit_lock_after_r: float = 1.0
     paper_profit_lock_r: float = 0.5

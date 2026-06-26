@@ -808,6 +808,34 @@ class Database:
                     ),
                 )
 
+    def update_trade_protection(
+        self,
+        trade_id: int,
+        *,
+        max_favorable_excursion: float | None = None,
+        max_adverse_excursion: float | None = None,
+        features: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist running excursions and the trailed (breakeven/profit-lock) state
+        on an OPEN trade so the live profit-lock survives across ticks."""
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE paper_trades
+                    SET max_favorable_excursion = COALESCE(%s, max_favorable_excursion),
+                        max_adverse_excursion = COALESCE(%s, max_adverse_excursion),
+                        features_json = COALESCE(%s, features_json)
+                    WHERE id = %s AND status = 'OPEN'
+                    """,
+                    (
+                        round(float(max_favorable_excursion), 2) if max_favorable_excursion is not None else None,
+                        round(float(max_adverse_excursion), 2) if max_adverse_excursion is not None else None,
+                        json.dumps(features, default=str) if features is not None else None,
+                        int(trade_id),
+                    ),
+                )
+
     def close_trade(self, trade_id: int, updates: dict[str, Any]) -> None:
         features = updates.get("features")
         notes = updates.get("notes")

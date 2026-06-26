@@ -159,15 +159,16 @@ def test_noise_filter_removes_weak_and_distant_zones() -> None:
     assert filtered == [strong]
 
 
-def test_temp_strong_move_zone_survives_weak_score_filter_when_enabled() -> None:
-    assert StrategyConfig().smart_temp_strong_move_zone_enabled is False
-    engine = LevelEngine(StrategyConfig(smart_min_zone_score=55, smart_temp_strong_move_zone_enabled=True))
-    strong_move = _zone("demand", 100, 120, score=20, touches=0, reactions=0)
-    strong_move.notes.append("TEMP strong move zone: price moved 120.0 points away")
+def test_noise_filter_has_no_strong_move_escape_hatch() -> None:
+    # The TEMP strong-move override was removed: a weak-score zone is filtered out
+    # uniformly, regardless of how far price later travelled away from it.
+    engine = LevelEngine(StrategyConfig(smart_min_zone_score=55))
+    weak_but_big_move = _zone("demand", 100, 120, score=20, touches=0, reactions=0)
+    weak_but_big_move.notes.append("price moved 120.0 points away")
 
-    filtered = engine.filter_noisy_zones([strong_move], current_price=130, atr=10)
+    filtered = engine.filter_noisy_zones([weak_but_big_move], current_price=130, atr=10)
 
-    assert filtered == [strong_move]
+    assert filtered == []
 
 
 def test_quality_zone_uses_origin_base_before_displacement() -> None:

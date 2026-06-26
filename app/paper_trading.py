@@ -29,70 +29,27 @@ class PaperTradeEngine:
         return trade
 
     def update_open_trade_with_quote(self, trade: PaperTrade, quote_price: float, quote_time: datetime | None = None) -> PaperTrade:
+        # A single live quote is just a one-point candle; route it through the same
+        # candle update used by replay/backtest so the live trade gets identical
+        # breakeven / profit-lock / near-target / square-off handling.
         if trade.status != "OPEN":
             return trade
         ts = quote_time or datetime.now()
         row = pd.Series({"high": quote_price, "low": quote_price, "close": quote_price, "time": ts.strftime("%H:%M")})
-        self._update_excursions(trade, row)
-        if trade.direction == "CE":
-            if quote_price <= trade.sl_index_price:
-                return self._close(trade, ts, trade.sl_index_price, "SL_HIT")
-            if quote_price >= trade.target_index_price:
-                return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
-        else:
-            if quote_price >= trade.sl_index_price:
-                return self._close(trade, ts, trade.sl_index_price, "SL_HIT")
-            if quote_price <= trade.target_index_price:
-                return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
-        if ts.strftime("%H:%M") >= self.cfg.square_off_time:
-            return self._close(trade, ts, quote_price, "TIME_EXIT")
-        return trade
+        return self.update_open_trade_with_candle(trade, ts, row)
 
     def simulate_trade(self, trade: PaperTrade, candles_5m: pd.DataFrame) -> PaperTrade:
+        # Backtest drives the trade candle-by-candle through the exact same update
+        # used by the replay bar, so backtest and replay can never diverge. The only
+        # extra is a data-end fallback close when the day's candles run out.
         start = pd.to_datetime(f"{trade.date} {trade.entry_time}")
         day = candles_5m[(candles_5m.index >= start) & (candles_5m["date"].astype(str) == trade.date)]
-        active_sl = float(trade.sl_index_price)
-        breakeven_active = False
-        profit_lock_active = False
-        near_target_pct = float(getattr(self.cfg, "paper_near_target_exit_pct", 0.0) or 0.0)
-        near_target_pct = min(max(near_target_pct, 0.0), 1.0)
         for ts, row in day.iterrows():
-            self._update_excursions(trade, row)
-            if trade.direction == "CE":
-                if row["low"] <= active_sl:
-                    return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
-                if row["high"] >= trade.target_index_price:
-                    return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
-                near_target = trade.entry_index_price + (trade.reward_points * near_target_pct)
-                if near_target_pct > 0 and row["high"] >= near_target:
-                    return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
-            else:
-                if row["high"] >= active_sl:
-                    return self._close(trade, ts, active_sl, "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT")
-                if row["low"] <= trade.target_index_price:
-                    return self._close(trade, ts, trade.target_index_price, "TARGET_HIT")
-                near_target = trade.entry_index_price - (trade.reward_points * near_target_pct)
-                if near_target_pct > 0 and row["low"] <= near_target:
-                    return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
-            if not breakeven_active and not profit_lock_active and trade.risk_points > 0:
-                lock_after_r = float(getattr(self.cfg, "paper_profit_lock_after_r", 0.0) or 0.0)
-                lock_r = float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0)
-                breakeven_after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
-                if lock_after_r > 0 and lock_r > 0 and trade.max_favorable_excursion >= trade.risk_points * lock_after_r:
-                    lock_points = trade.risk_points * lock_r
-                    active_sl = round(float(trade.entry_index_price + lock_points if trade.direction == "CE" else trade.entry_index_price - lock_points), 2)
-                    profit_lock_active = True
-                    trade.features["profit_lock_armed_at"] = ts.strftime("%H:%M")
-                    trade.features["profit_lock_R"] = round(lock_r, 3)
-                elif breakeven_after_r > 0 and trade.max_favorable_excursion >= trade.risk_points * breakeven_after_r:
-                    active_sl = float(trade.entry_index_price)
-                    breakeven_active = True
-                    trade.features["breakeven_armed_at"] = ts.strftime("%H:%M")
-            if row["time"] >= self.cfg.square_off_time:
-                return self._close(trade, ts, float(row["close"]), "TIME_EXIT")
-        if not day.empty:
-            row = day.iloc[-1]
-            return self._close(trade, day.index[-1], float(row["close"]), "DATA_END_EXIT")
+            if trade.status != "OPEN":
+                break
+            trade = self.update_open_trade_with_candle(trade, ts, row)
+        if trade.status == "OPEN" and not day.empty:
+            trade = self._close(trade, day.index[-1], float(day.iloc[-1]["close"]), "DATA_END_EXIT")
         return trade
 
     def update_open_trade_with_candle(self, trade: PaperTrade, ts: datetime, row: pd.Series) -> PaperTrade:
@@ -120,26 +77,60 @@ class PaperTradeEngine:
             near_target = trade.entry_index_price - (trade.reward_points * near_target_pct)
             if near_target_pct > 0 and row["low"] <= near_target:
                 return self._close(trade, ts, near_target, "NEAR_TARGET_EXIT")
-        if not breakeven_active and not profit_lock_active and trade.risk_points > 0:
-            lock_after_r = float(getattr(self.cfg, "paper_profit_lock_after_r", 0.0) or 0.0)
-            lock_r = float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0)
-            breakeven_after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
-            if lock_after_r > 0 and lock_r > 0 and trade.max_favorable_excursion >= trade.risk_points * lock_after_r:
-                lock_points = trade.risk_points * lock_r
-                trade.features["active_sl_index_price"] = round(float(trade.entry_index_price + lock_points if trade.direction == "CE" else trade.entry_index_price - lock_points), 2)
-                trade.features["profit_lock_active"] = True
-                trade.features["profit_lock_armed_at"] = ts.strftime("%H:%M")
-                trade.features["profit_lock_R"] = round(lock_r, 3)
-            elif breakeven_after_r > 0 and trade.max_favorable_excursion >= trade.risk_points * breakeven_after_r:
-                trade.features["active_sl_index_price"] = round(float(trade.entry_index_price), 2)
-                trade.features["breakeven_active"] = True
-                trade.features["breakeven_armed_at"] = ts.strftime("%H:%M")
+        trailed_sl, breakeven_active, profit_lock_active, armed = self.arm_protective_sl(
+            direction=trade.direction,
+            entry_price=trade.entry_index_price,
+            risk_points=trade.risk_points,
+            max_favorable_excursion=trade.max_favorable_excursion,
+            active_sl=active_sl,
+            breakeven_active=breakeven_active,
+            profit_lock_active=profit_lock_active,
+        )
+        if armed == "profit_lock":
+            trade.features["active_sl_index_price"] = trailed_sl
+            trade.features["profit_lock_active"] = True
+            trade.features["profit_lock_armed_at"] = ts.strftime("%H:%M")
+            trade.features["profit_lock_R"] = round(float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0), 3)
+        elif armed == "breakeven":
+            trade.features["active_sl_index_price"] = trailed_sl
+            trade.features["breakeven_active"] = True
+            trade.features["breakeven_armed_at"] = ts.strftime("%H:%M")
         if str(row.get("time") or ts.strftime("%H:%M")) >= self.cfg.square_off_time:
             return self._close(trade, ts, float(row["close"]), "TIME_EXIT")
         return trade
 
     def simulate_many(self, signals: Iterable[SignalCandidate], candles_5m: pd.DataFrame) -> list[PaperTrade]:
         return [self.simulate_trade(self.create_trade(signal), candles_5m) for signal in signals]
+
+    def arm_protective_sl(
+        self,
+        *,
+        direction: str,
+        entry_price: float,
+        risk_points: float,
+        max_favorable_excursion: float,
+        active_sl: float,
+        breakeven_active: bool,
+        profit_lock_active: bool,
+    ) -> tuple[float, bool, bool, str | None]:
+        """Breakeven / profit-lock arming shared by replay, backtest and live so all
+        three trail the stop with identical rules. Once the move reaches
+        ``paper_profit_lock_after_r`` of risk it locks ``paper_profit_lock_r`` of
+        profit; otherwise once it reaches ``paper_breakeven_after_r`` it moves the
+        stop to entry. Returns the (possibly trailed) active SL, the updated
+        breakeven/profit-lock flags, and which protection armed this call (or None)."""
+        if breakeven_active or profit_lock_active or risk_points <= 0:
+            return active_sl, breakeven_active, profit_lock_active, None
+        lock_after_r = float(getattr(self.cfg, "paper_profit_lock_after_r", 0.0) or 0.0)
+        lock_r = float(getattr(self.cfg, "paper_profit_lock_r", 0.0) or 0.0)
+        breakeven_after_r = float(getattr(self.cfg, "paper_breakeven_after_r", 0.0) or 0.0)
+        if lock_after_r > 0 and lock_r > 0 and max_favorable_excursion >= risk_points * lock_after_r:
+            lock_points = risk_points * lock_r
+            trailed = round(float(entry_price + lock_points if direction == "CE" else entry_price - lock_points), 2)
+            return trailed, breakeven_active, True, "profit_lock"
+        if breakeven_after_r > 0 and max_favorable_excursion >= risk_points * breakeven_after_r:
+            return round(float(entry_price), 2), True, profit_lock_active, "breakeven"
+        return active_sl, breakeven_active, profit_lock_active, None
 
     def _update_excursions(self, trade: PaperTrade, row: pd.Series) -> None:
         if trade.direction == "CE":

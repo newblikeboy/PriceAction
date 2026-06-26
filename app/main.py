@@ -1385,18 +1385,58 @@ def update_live_open_trades(
             except Exception:
                 pass
 
+        # Breakeven / profit-lock trailing — identical engine to replay & backtest.
+        features = json_payload(trade.get("features_json"))
+        risk_points = to_float(trade.get("risk_points"), 0.0)
+        if direction == "CE":
+            favorable = underlying_price - underlying_entry
+            adverse = underlying_entry - underlying_price
+        else:
+            favorable = underlying_entry - underlying_price
+            adverse = underlying_price - underlying_entry
+        mfe = max(to_float(trade.get("max_favorable_excursion"), 0.0), round(float(favorable), 2))
+        mae = max(to_float(trade.get("max_adverse_excursion"), 0.0), round(float(adverse), 2))
+        sl = to_float(trade.get("sl_index_price"), 0.0)
+        active_sl = to_float(features.get("active_sl_index_price"), sl)
+        breakeven_active = bool(features.get("breakeven_active"))
+        profit_lock_active = bool(features.get("profit_lock_active"))
+        paper_engine = PaperTradeEngine()
+        active_sl, breakeven_active, profit_lock_active, armed = paper_engine.arm_protective_sl(
+            direction=direction,
+            entry_price=underlying_entry,
+            risk_points=risk_points,
+            max_favorable_excursion=mfe,
+            active_sl=active_sl,
+            breakeven_active=breakeven_active,
+            profit_lock_active=profit_lock_active,
+        )
+        if armed == "profit_lock":
+            features["active_sl_index_price"] = active_sl
+            features["profit_lock_active"] = True
+            features["profit_lock_armed_at"] = tick_time.strftime("%H:%M")
+            features["profit_lock_R"] = round(to_float(getattr(paper_engine.cfg, "paper_profit_lock_r", 0.0), 0.0), 3)
+        elif armed == "breakeven":
+            features["active_sl_index_price"] = active_sl
+            features["breakeven_active"] = True
+            features["breakeven_armed_at"] = tick_time.strftime("%H:%M")
+        try:
+            db.update_trade_protection(trade_id, max_favorable_excursion=mfe, max_adverse_excursion=mae, features=features)
+            changed = True
+        except Exception:
+            pass
+
         close_price: float | None = None
         reason = ""
-        sl = to_float(trade.get("sl_index_price"), 0.0)
         target = to_float(trade.get("target_index_price"), 0.0)
+        stop_reason = "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT"
         if direction == "CE":
-            if underlying_price <= sl:
-                close_price, reason = sl, "SL_HIT"
+            if underlying_price <= active_sl:
+                close_price, reason = active_sl, stop_reason
             elif underlying_price >= target:
                 close_price, reason = target, "TARGET_HIT"
         elif direction == "PE":
-            if underlying_price >= sl:
-                close_price, reason = sl, "SL_HIT"
+            if underlying_price >= active_sl:
+                close_price, reason = active_sl, stop_reason
             elif underlying_price <= target:
                 close_price, reason = target, "TARGET_HIT"
         if allow_time_exit and close_price is None and tick_time.strftime("%H:%M") >= PaperTradeEngine().cfg.square_off_time:
@@ -1421,7 +1461,7 @@ def update_live_open_trades(
             pnl_source = "underlying_fallback" if not option_symbol else "option_quote_unavailable"
         r_multiple = round(points / to_float(trade.get("risk_points"), 1.0), 3) if to_float(trade.get("risk_points"), 0.0) else 0
         result = "WIN" if points > 0 else "LOSS" if points < 0 else "FLAT"
-        features = json_payload(trade.get("features_json"))
+        # Reuse the features dict already carrying the trailed-stop state from above.
         features.update(
             {
                 "result": result,
@@ -1441,8 +1481,8 @@ def update_live_open_trades(
                     "exit_reason": reason,
                     "result": result,
                     "r_multiple": r_multiple,
-                    "max_favorable_excursion": trade.get("max_favorable_excursion"),
-                    "max_adverse_excursion": trade.get("max_adverse_excursion"),
+                    "max_favorable_excursion": round(mfe, 2),
+                    "max_adverse_excursion": round(mae, 2),
                     "option_symbol": str((quote or {}).get("resolved_symbol") or (quote or {}).get("symbol") or option_symbol),
                     "option_mark_ltp": round(option_exit, 2) if option_exit else None,
                     "option_exit_ltp": round(option_exit, 2) if option_exit else None,
