@@ -160,7 +160,9 @@ class StrategyConfig:
     smart_trade_sl_zone_inner_fraction: float = 0.25
     # Zone history / refresh cadence.
     smart_trade_zone_history_days: int = 2
-    smart_trade_zone_refresh_candles: int = 12
+    smart_trade_zone_refresh_candles: int = 6
+    smart_trade_zone_remove_min_touches: int = 3
+    smart_trade_zone_remove_min_breaks: int = 1
     # Definition of a displacement (sweep-reclaim) candle: strong body, ATR-relative range.
     smart_trade_sweep_reclaim_min_body_pct: float = 0.55
     smart_trade_sweep_reclaim_min_range_atr: float = 1.0
@@ -168,6 +170,9 @@ class StrategyConfig:
     # Trend continuation: buy/sell the pullback into a with-trend zone while the trend is intact.
     smart_trade_continuation_enabled: bool = True
     smart_trade_continuation_pullback_lookback: int = 4
+    smart_trade_zone_loss_cooldown_enabled: bool = True
+    smart_trade_late_strength_start: str = "12:00"
+    smart_trade_block_continuation_after: str = "13:30"
     paper_breakeven_after_r: float = 1.0
     paper_profit_lock_after_r: float = 1.0
     paper_profit_lock_r: float = 0.5

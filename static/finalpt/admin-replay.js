@@ -253,7 +253,7 @@
       return;
     }
     if (!Array.isArray(trades) || trades.length === 0) {
-      tradesBody.innerHTML = '<tr><td colspan="14" class="small">No replay trades yet.</td></tr>';
+      tradesBody.innerHTML = '<tr><td colspan="21" class="small">No replay trades yet.</td></tr>';
       return;
     }
     tradesBody.innerHTML = trades.map(function (trade, index) {
@@ -268,9 +268,16 @@
         <td>${escapeHtml(trade.sl_index_price)}</td>
         <td>${escapeHtml(trade.target_index_price)}</td>
         <td>${escapeHtml(trade.exit_index_price || "--")}</td>
+        <td>${escapeHtml(trade.exit_reason || "--")}</td>
         <td>${escapeHtml(trade.result || trade.status || "--")}</td>
         <td>${escapeHtml(trade.points == null ? "" : trade.points)}</td>
         <td>${escapeHtml(trade.r_multiple == null ? "" : trade.r_multiple)}</td>
+        <td>${escapeHtml(trade.max_favorable_excursion == null ? "" : trade.max_favorable_excursion)}</td>
+        <td>${escapeHtml(trade.max_adverse_excursion == null ? "" : trade.max_adverse_excursion)}</td>
+        <td>${escapeHtml(trade.mfe_r == null ? "" : trade.mfe_r)}</td>
+        <td>${escapeHtml(trade.mae_r == null ? "" : trade.mae_r)}</td>
+        <td>${escapeHtml(trade.planned_rr == null ? "" : trade.planned_rr)}</td>
+        <td>${escapeHtml(trade.target_source || trade.target_name || "")}</td>
         <td class="truncate-cell reason-cell" title="${escapeHtml(trade.reason || "")}">${escapeHtml(trade.reason || "--")}</td>
       </tr>`;
     }).join("");
@@ -447,7 +454,18 @@
         const previousVisibleCandles = lastVisibleCandles;
         const isNewSession = frame.session_id && frame.session_id !== activeSessionId;
         const delta = frame.candles_delta || [];
-        if (!frame.is_delta || isNewSession || !activeSessionId) {
+        if (frame.compact && delta.length && !isNewSession && activeSessionId) {
+          candleSeries.update(delta[delta.length - 1]);
+          const range = nextVisibleRange(previousRange, previousVisibleCandles, frame.visible_candles);
+          if (range) {
+            chart.timeScale().setVisibleLogicalRange(range);
+          }
+          activeSessionId = frame.session_id || activeSessionId;
+          lastVisibleCandles = Number(frame.visible_candles || 0);
+          setText(counterEl, `${frame.visible_candles} / ${frame.total_candles}`);
+          setText(messageEl, `Current candle: ${frame.current_time}`);
+          setText(summaryNodes.currentPrice, frame.current_price || "--");
+        } else if (!frame.is_delta || isNewSession || !activeSessionId) {
           updateReplay(frame);
         } else if (delta.length) {
           candleSeries.update(delta[delta.length - 1]);

@@ -16,6 +16,10 @@ from app.paper_trading import PaperTradeEngine
 
 
 IST = ZoneInfo("Asia/Kolkata")
+ZONE_LOSS_COOLDOWN_SETUPS = {
+    "SMART_ZONE_BREAK_CONFIRMATION",
+    "SMART_ZONE_TREND_CONTINUATION",
+}
 
 
 def replay_chart_time(value: Any) -> int:
@@ -41,6 +45,7 @@ class ReplayBarSession:
     trades: list[PaperTrade] = field(default_factory=list)
     skipped: list[SkippedSignal] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    failed_zone_ids_by_date: dict[str, set[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.candles_5m = self._normalize(self.candles_5m)
@@ -55,6 +60,8 @@ class ReplayBarSession:
         self.signals = SignalEngine(self.cfg)
         self.paper = PaperTradeEngine(self.cfg)
         self._chart_zone_cache: dict[int, list[dict[str, Any]]] = {}
+        self._engine_rows = self.signals.smart_trades._rows(self.candles_5m)
+        self._level_cache: dict[int, Any] = {}
 
     def reset(self) -> dict[str, Any]:
         self.current_index = self.replay_start_index
@@ -63,7 +70,9 @@ class ReplayBarSession:
         self.trades.clear()
         self.skipped.clear()
         self.events.clear()
+        self.failed_zone_ids_by_date.clear()
         self._chart_zone_cache.clear()
+        self._level_cache.clear()
         return self.payload()
 
     def next(self, count: int = 1) -> dict[str, Any]:
@@ -74,7 +83,9 @@ class ReplayBarSession:
                 break
             self.current_index += 1
             self._evaluate_current_candle()
-            frames.append(self.payload(delta_from_index=self.current_index))
+            frames.append(self._compact_payload(delta_from_index=self.current_index))
+        if frames:
+            frames[-1] = self.payload(delta_from_index=self.current_index)
         payload = dict(frames[-1]) if frames else self.payload(delta_from_index=self.current_index + 1)
         payload["frames"] = frames
         return payload
@@ -92,7 +103,9 @@ class ReplayBarSession:
         self.trades.clear()
         self.skipped.clear()
         self.events.clear()
+        self.failed_zone_ids_by_date.clear()
         self._chart_zone_cache.clear()
+        self._level_cache.clear()
         while self.current_index < target_index:
             self.current_index += 1
             self._evaluate_current_candle()
@@ -141,7 +154,37 @@ class ReplayBarSession:
         return self.candles_5m.iloc[self.replay_start_index : self.current_index + 1].copy()
 
     def engine_candles(self) -> pd.DataFrame:
-        return self.candles_5m.iloc[: self.current_index + 1].copy()
+        return self.candles_5m.iloc[: self.current_index + 1]
+
+    def _compact_payload(self, delta_from_index: int) -> dict[str, Any]:
+        start = max(self.replay_start_index, min(int(delta_from_index or 0), self.current_index + 1))
+        delta_candles = self.candles_5m.iloc[start : self.current_index + 1]
+        current_ts = self.candles_5m.index[self.current_index]
+        current_row = self.candles_5m.iloc[self.current_index]
+        return {
+            "session_id": self.session_id,
+            "is_delta": True,
+            "compact": True,
+            "symbol": self.symbol,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "current_index": self.current_index,
+            "visible_candles": self.current_index - self.replay_start_index + 1,
+            "total_candles": len(self.candles_5m) - self.replay_start_index,
+            "current_time": str(current_ts),
+            "current_price": round(float(current_row["close"]), 2),
+            "is_done": self.current_index >= len(self.candles_5m) - 1,
+            "candles": [],
+            "candles_delta": self._candles_payload(delta_candles),
+        }
+
+    def _levels_for_current_index(self, visible: pd.DataFrame, trading_date: date) -> Any:
+        cached = self._level_cache.get(self.current_index)
+        if cached is not None:
+            return cached
+        level_set = self.levels.calculate(visible, trading_date)
+        self._level_cache[self.current_index] = level_set
+        return level_set
 
     def _evaluate_current_candle(self) -> None:
         ts = self.candles_5m.index[self.current_index]
@@ -152,6 +195,7 @@ class ReplayBarSession:
             self.open_trade = self.paper.update_open_trade_with_candle(self.open_trade, ts.to_pydatetime(), row)
             if before_status == "OPEN" and self.open_trade.status == "CLOSED":
                 self.trades.append(self.open_trade)
+                self._record_failed_zone(self.open_trade)
                 self.events.append({"time": str(ts), "type": "trade_closed", "message": f"{self.open_trade.result} {self.open_trade.exit_reason}"})
                 self.open_trade = None
         self._activate_pending_signal(ts)
@@ -162,14 +206,15 @@ class ReplayBarSession:
 
         visible = self.engine_candles()
         trading_date = row["date"]
-        level_set = self.levels.calculate(visible, trading_date)
-        candle_signals, candle_skipped = self.signals.generate_for_candle(visible, level_set, trading_date, ts)
+        level_set = self._levels_for_current_index(visible, trading_date)
+        signal_rows = self._engine_rows.iloc[: self.current_index + 1]
+        candle_signals, candle_skipped = self.signals.generate_for_candle_rows(signal_rows, level_set, trading_date, ts)
         self.skipped.extend(candle_skipped)
         if not candle_signals:
             return
-        candidates = candle_signals
+        candidates = self._filter_failed_zone_signals(candle_signals)
         if self.open_trade is not None:
-            candidates = [signal for signal in candle_signals if self._can_queue_reversal(signal)]
+            candidates = [signal for signal in candidates if self._can_queue_reversal(signal)]
             for blocked_signal in candle_signals:
                 if blocked_signal in candidates:
                     continue
@@ -213,6 +258,7 @@ class ReplayBarSession:
                 return
             self.open_trade = self.paper._close(self.open_trade, ts.to_pydatetime(), self.pending_signal.entry_index_price, "REVERSAL_EXIT")
             self.trades.append(self.open_trade)
+            self._record_failed_zone(self.open_trade)
             self.events.append({"time": str(ts), "type": "trade_closed", "message": f"{self.open_trade.result} REVERSAL_EXIT"})
             self.open_trade = None
         self.open_trade = self.paper.create_trade(self.pending_signal)
@@ -229,6 +275,57 @@ class ReplayBarSession:
             "SMART_ZONE_SWEEP_RECLAIM_DISPLACEMENT",
         }
 
+    def _filter_failed_zone_signals(self, signals: list[SignalCandidate]) -> list[SignalCandidate]:
+        if not self.cfg.smart_trade_zone_loss_cooldown_enabled:
+            return signals
+        out: list[SignalCandidate] = []
+        for signal in signals:
+            zone_id = self._signal_zone_id(signal)
+            failed_zone_ids = self.failed_zone_ids_by_date.get(signal.date, set())
+            blocked = (
+                signal.setup_type in ZONE_LOSS_COOLDOWN_SETUPS
+                and zone_id is not None
+                and zone_id in failed_zone_ids
+            )
+            if blocked:
+                self.skipped.append(
+                    SkippedSignal(
+                        signal.date,
+                        str(signal.features.get("time") or signal.time),
+                        signal.direction,
+                        signal.setup_type,
+                        "Zone blocked after same-day losing trade",
+                        {"zone_id": zone_id},
+                    )
+                )
+                continue
+            out.append(signal)
+        return out
+
+    def _record_failed_zone(self, trade: PaperTrade) -> None:
+        if not self.cfg.smart_trade_zone_loss_cooldown_enabled or trade.result != "LOSS":
+            return
+        zone_id = self._trade_zone_id(trade)
+        if not zone_id:
+            return
+        self.failed_zone_ids_by_date.setdefault(trade.date, set()).add(zone_id)
+
+    @staticmethod
+    def _signal_zone_id(signal: SignalCandidate) -> str | None:
+        zone = signal.features.get("smart_zone") if isinstance(signal.features, dict) else None
+        if isinstance(zone, dict):
+            value = zone.get("zone_id")
+            return str(value) if value else None
+        return None
+
+    @staticmethod
+    def _trade_zone_id(trade: PaperTrade) -> str | None:
+        zone = trade.features.get("smart_zone") if isinstance(trade.features, dict) else None
+        if isinstance(zone, dict):
+            value = zone.get("zone_id")
+            return str(value) if value else None
+        return None
+
     def _zones_payload(self, visible: pd.DataFrame, current_price: float, current_ts: pd.Timestamp) -> list[dict[str, Any]]:
         anchor_index = self._zone_anchor_index()
         cached = self._chart_zone_cache.get(anchor_index)
@@ -237,16 +334,17 @@ class ReplayBarSession:
 
         anchor_index = max(0, min(anchor_index, len(self.candles_5m) - 1))
         anchor_ts = pd.to_datetime(self.candles_5m.index[anchor_index])
-        anchor_visible = self.candles_5m.iloc[: anchor_index + 1].copy()
         anchor_price = float(self.candles_5m.iloc[anchor_index]["close"])
-        zone_history = self._zone_history(anchor_visible, anchor_ts)
-        result = self.levels.calculate_smart_zones(zone_history, current_price=anchor_price, as_of=anchor_ts)
+        zones = self.signals.smart_trades.zones_for_candle_rows(
+            self._engine_rows,
+            anchor_ts.date(),
+            anchor_ts,
+        )
 
         today_date = anchor_ts.date()
-        atr = max(float(result.atr or 1.0), 1.0)
 
         # Focus = top 5 zones closest to current price with score >= 70
-        all_zones = result.strongest_zones[:15]
+        all_zones = sorted(zones, key=lambda zone: float(zone.score), reverse=True)[:15]
         zones_by_distance = sorted(all_zones, key=lambda z: abs(float(z.midpoint) - anchor_price))
         focus_ids = {z.zone_id for z in zones_by_distance[:5] if float(z.score) >= 70}
 
@@ -277,11 +375,14 @@ class ReplayBarSession:
         return out
 
     def _zone_anchor_index(self) -> int:
-        refresh_every = max(int(getattr(self.cfg, "smart_trade_zone_refresh_candles", 12) or 12), 1)
-        warmup_index = self.replay_start_index
-        if self.current_index <= warmup_index:
+        current_date = self.candles_5m.iloc[self.current_index]["date"]
+        day_positions = self.candles_5m.index[self.candles_5m["date"] == current_date]
+        if day_positions.empty:
             return self.current_index
-        return warmup_index + ((self.current_index - warmup_index) // refresh_every) * refresh_every
+        day_start = int(self.candles_5m.index.get_loc(day_positions[0]))
+        day_offset = self.current_index - day_start
+        intraday_anchor = self.signals.smart_trades._intraday_refresh_anchor_index(day_offset)
+        return day_start if intraday_anchor is None else day_start + intraday_anchor
 
     def _zone_history(self, visible: pd.DataFrame, current_ts: pd.Timestamp) -> pd.DataFrame:
         days = int(getattr(self.cfg, "smart_trade_zone_history_days", 0) or 0)
@@ -388,6 +489,9 @@ class ReplayBarSession:
         }
 
     def _trade_payload(self, trade: PaperTrade) -> dict[str, Any]:
+        mfe = float(trade.max_favorable_excursion or 0.0)
+        mae = float(trade.max_adverse_excursion or 0.0)
+        risk = float(trade.risk_points or 0.0)
         return {
             "date": trade.date,
             "entry_time": trade.entry_time,
@@ -403,6 +507,15 @@ class ReplayBarSession:
             "result": trade.result,
             "points": trade.underlying_points,
             "r_multiple": trade.r_multiple,
+            "risk_points": trade.risk_points,
+            "reward_points": trade.reward_points,
+            "planned_rr": trade.risk_reward,
+            "max_favorable_excursion": round(mfe, 2),
+            "max_adverse_excursion": round(mae, 2),
+            "mfe_r": round(mfe / risk, 3) if risk else 0,
+            "mae_r": round(mae / risk, 3) if risk else 0,
+            "target_source": trade.features.get("target_source") if isinstance(trade.features, dict) else None,
+            "target_name": trade.features.get("target_name") if isinstance(trade.features, dict) else None,
             "setup_score": trade.setup_score,
             "reason": " | ".join(trade.notes),
         }

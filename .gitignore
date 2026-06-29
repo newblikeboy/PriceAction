@@ -1,3 +1,48 @@
+# Secrets and local environment
 .env
+.env.*
+!.env.example
 data/fyers_auth.json
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime logs
 *.log
+data/*.log
+
+# Local databases and runtime state
+*.sqlite
+*.sqlite3
+*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+
+# Local tooling and reports
+.claude/
+market_certification/reports/
+*_audit.csv
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Large local reference artifacts
+BookFrankMiller.pdf

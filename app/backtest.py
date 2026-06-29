@@ -13,6 +13,12 @@ from app.engines.signals import SignalEngine
 from app.paper_trading import PaperTradeEngine
 
 
+ZONE_LOSS_COOLDOWN_SETUPS = {
+    "SMART_ZONE_BREAK_CONFIRMATION",
+    "SMART_ZONE_TREND_CONTINUATION",
+}
+
+
 @dataclass
 class BacktestResult:
     trades: list[PaperTrade]
@@ -51,7 +57,9 @@ class BacktestRunner:
                 }
             )
         open_until: pd.Timestamp | None = None
+        failed_zone_ids_by_date: dict[str, set[str]] = {}
         for index, trading_date in enumerate(trading_dates, start=1):
+            failed_zone_ids = failed_zone_ids_by_date.setdefault(str(trading_date), set())
             day_rows = candles_5m[candles_5m["date"] == trading_date]
             for candle_time, row in day_rows.iterrows():
                 if row["time"] < self.cfg.opening_range_end:
@@ -71,7 +79,10 @@ class BacktestRunner:
                 skipped.extend(candle_skipped)
                 if not candle_signals:
                     continue
-                signal = max(candle_signals, key=lambda item: item.setup_score)
+                candidates = self._filter_failed_zone_signals(candle_signals, failed_zone_ids, skipped)
+                if not candidates:
+                    continue
+                signal = max(candidates, key=lambda item: item.setup_score)
                 entry_at = pd.to_datetime(f"{signal.date} {signal.time}")
                 if open_until is not None and entry_at <= open_until:
                     skipped.append(
@@ -85,7 +96,7 @@ class BacktestRunner:
                         )
                     )
                     continue
-                for extra_signal in candle_signals:
+                for extra_signal in candidates:
                     if extra_signal is signal:
                         continue
                     skipped.append(
@@ -100,6 +111,7 @@ class BacktestRunner:
                     )
                 simulated = self.paper.simulate_trade(self.paper.create_trade(signal), candles_5m)
                 trades.append(simulated)
+                self._record_failed_zone(simulated, failed_zone_ids)
                 if simulated.exit_time:
                     open_until = pd.to_datetime(f"{simulated.date} {simulated.exit_time}")
                 else:
@@ -117,6 +129,60 @@ class BacktestRunner:
                 )
         summary_candles = candles_5m[candles_5m["date"].isin(trading_dates)]
         return BacktestResult(trades=trades, skipped_signals=skipped, summary=self.summary(trades, summary_candles))
+
+    def _filter_failed_zone_signals(
+        self,
+        signals: list[SignalCandidate],
+        failed_zone_ids: set[str],
+        skipped: list[SkippedSignal],
+    ) -> list[SignalCandidate]:
+        if not self.cfg.smart_trade_zone_loss_cooldown_enabled or not failed_zone_ids:
+            return signals
+        out: list[SignalCandidate] = []
+        for signal in signals:
+            zone_id = self._signal_zone_id(signal)
+            blocked = (
+                signal.setup_type in ZONE_LOSS_COOLDOWN_SETUPS
+                and zone_id is not None
+                and zone_id in failed_zone_ids
+            )
+            if blocked:
+                skipped.append(
+                    SkippedSignal(
+                        signal.date,
+                        str(signal.features.get("time") or signal.time),
+                        signal.direction,
+                        signal.setup_type,
+                        "Zone blocked after same-day losing trade",
+                        {"zone_id": zone_id},
+                    )
+                )
+                continue
+            out.append(signal)
+        return out
+
+    def _record_failed_zone(self, trade: PaperTrade, failed_zone_ids: set[str]) -> None:
+        if not self.cfg.smart_trade_zone_loss_cooldown_enabled or trade.result != "LOSS":
+            return
+        zone_id = self._trade_zone_id(trade)
+        if zone_id:
+            failed_zone_ids.add(zone_id)
+
+    @staticmethod
+    def _signal_zone_id(signal: SignalCandidate) -> str | None:
+        zone = signal.features.get("smart_zone") if isinstance(signal.features, dict) else None
+        if isinstance(zone, dict):
+            value = zone.get("zone_id")
+            return str(value) if value else None
+        return None
+
+    @staticmethod
+    def _trade_zone_id(trade: PaperTrade) -> str | None:
+        zone = trade.features.get("smart_zone") if isinstance(trade.features, dict) else None
+        if isinstance(zone, dict):
+            value = zone.get("zone_id")
+            return str(value) if value else None
+        return None
 
     def _normalize_candles(self, candles_5m: pd.DataFrame) -> pd.DataFrame:
         frame = candles_5m.copy()

@@ -50,6 +50,25 @@ class FakeSignals:
         return [signal], []
 
 
+class RepeatedZoneSignals:
+    def __init__(self) -> None:
+        self.option_snapshot: dict[str, Any] | None = None
+
+    def generate_for_candle(
+        self,
+        candles_5m: pd.DataFrame,
+        levels: LevelSet,
+        trading_date: date,
+        candle_time,
+    ):
+        current = pd.to_datetime(candle_time)
+        if current.strftime("%H:%M") == "09:35":
+            return [_same_zone_signal(trading_date, "09:40")], []
+        if current.strftime("%H:%M") == "09:45":
+            return [_same_zone_signal(trading_date, "09:50")], []
+        return [], []
+
+
 def test_backtest_runner_replays_only_visible_candles() -> None:
     cfg = StrategyConfig(opening_range_end="09:30", no_fresh_trade_after="15:00")
     runner = BacktestRunner(cfg)
@@ -66,12 +85,65 @@ def test_backtest_runner_replays_only_visible_candles() -> None:
     assert result.trades[0].exit_reason == "TARGET_HIT"
 
 
+def test_backtest_blocks_break_signal_after_same_day_zone_loss() -> None:
+    cfg = StrategyConfig(opening_range_end="09:30", no_fresh_trade_after="15:00")
+    runner = BacktestRunner(cfg)
+    runner.levels = FakeLevels()
+    runner.signals = RepeatedZoneSignals()
+    candles = _cooldown_candles()
+
+    result = runner.run(candles)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].result == "LOSS"
+    assert any(item.skip_reason == "Zone blocked after same-day losing trade" for item in result.skipped_signals)
+
+
+def _same_zone_signal(trading_date: date, entry_time: str) -> SignalCandidate:
+    return SignalCandidate(
+        date=str(trading_date),
+        time=entry_time,
+        symbol="NIFTY",
+        direction="CE",
+        setup_type="SMART_ZONE_BREAK_CONFIRMATION",
+        entry_index_price=100.0,
+        sl_index_price=95.0,
+        target_index_price=110.0,
+        risk_points=5.0,
+        reward_points=10.0,
+        risk_reward=2.0,
+        setup_score=90,
+        features={
+            "date": str(trading_date),
+            "time": entry_time,
+            "smart_zone": {"zone_id": "zone-1"},
+        },
+    )
+
+
 def _candles() -> pd.DataFrame:
     rows = [
         {"datetime": "2024-01-01 09:15", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
         {"datetime": "2024-01-01 09:30", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
         {"datetime": "2024-01-01 09:35", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
         {"datetime": "2024-01-01 09:40", "open": 100, "high": 111, "low": 99, "close": 110, "volume": 0},
+    ]
+    frame = pd.DataFrame(rows)
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+    frame = frame.set_index("datetime")
+    frame["date"] = frame.index.date
+    frame["time"] = frame.index.strftime("%H:%M")
+    return frame
+
+
+def _cooldown_candles() -> pd.DataFrame:
+    rows = [
+        {"datetime": "2024-01-01 09:15", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
+        {"datetime": "2024-01-01 09:30", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
+        {"datetime": "2024-01-01 09:35", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
+        {"datetime": "2024-01-01 09:40", "open": 100, "high": 101, "low": 94, "close": 95, "volume": 0},
+        {"datetime": "2024-01-01 09:45", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 0},
+        {"datetime": "2024-01-01 09:50", "open": 100, "high": 111, "low": 99, "close": 110, "volume": 0},
     ]
     frame = pd.DataFrame(rows)
     frame["datetime"] = pd.to_datetime(frame["datetime"])

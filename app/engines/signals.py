@@ -39,3 +39,13 @@ class SignalEngine:
     ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
         self.smart_trades.option_snapshot = self.option_snapshot
         return self.smart_trades.generate_for_candle(candles_5m, levels, trading_date, candle_time)
+
+    def generate_for_candle_rows(
+        self,
+        all_rows: pd.DataFrame,
+        levels: LevelSet,
+        trading_date: date,
+        candle_time,
+    ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
+        self.smart_trades.option_snapshot = self.option_snapshot
+        return self.smart_trades.generate_for_candle_rows(all_rows, levels, trading_date, candle_time)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 import math
 from typing import Any
@@ -32,6 +33,8 @@ class SmartTradeEngine:
         self._snapshot_cache: dict[pd.Timestamp, tuple[list[SmartZone], float]] = {}
         self._htf_context_cache: dict[pd.Timestamp, dict[str, Any]] = {}
         self._prev_day_zones_cache: dict[date, list[SmartZone]] = {}
+        self._intraday_zone_snapshots: dict[pd.Timestamp, list[SmartZone]] = {}
+        self._intraday_retired_zone_snapshots: dict[pd.Timestamp, list[SmartZone]] = {}
 
     def generate_for_day(
         self,
@@ -53,8 +56,8 @@ class SmartTradeEngine:
         self._previous_day_zones(all_rows, trading_date)
         seen: set[tuple[str, str, str]] = set()
         one_shot_taken: set[tuple[str, str, str]] = set()
-        cached_zones: list[SmartZone] = []
-        last_zone_refresh_index = -10_000
+        cached_zones = self._previous_day_zones(all_rows, trading_date)
+        last_zone_anchor: int | None | object = object()
         for break_index, break_row in day_rows.iterrows():
             if break_row["time"] < self.cfg.opening_range_end or break_row["time"] > self.cfg.no_fresh_trade_after:
                 continue
@@ -65,10 +68,10 @@ class SmartTradeEngine:
 
             previous_close = float(history.iloc[-1]["close"])
             atr = self._latest_atr(history)
-            refresh_every = max(int(self.cfg.smart_trade_zone_refresh_candles), 1)
-            if break_index - last_zone_refresh_index >= refresh_every:
+            zone_anchor = self._intraday_refresh_anchor_index(int(break_index))
+            if zone_anchor != last_zone_anchor:
                 cached_zones = self._known_zones(all_rows, previous_close, break_row["datetime"], trading_date)
-                last_zone_refresh_index = int(break_index)
+                last_zone_anchor = zone_anchor
             zones = cached_zones
             day_trend = self._day_trend(day_rows, int(break_index))
             for zone in zones:
@@ -165,21 +168,35 @@ class SmartTradeEngine:
         candle_time,
         htf_context: dict[str, Any] | None = None,
     ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
+        all_rows = self._rows(candles_5m)
+        return self.generate_for_candle_rows(all_rows, levels, trading_date, candle_time, htf_context)
+
+    def generate_for_candle_rows(
+        self,
+        all_rows: pd.DataFrame,
+        levels: LevelSet,
+        trading_date: date,
+        candle_time,
+        htf_context: dict[str, Any] | None = None,
+    ) -> tuple[list[SignalCandidate], list[SkippedSignal]]:
         signals: list[SignalCandidate] = []
         skipped: list[SkippedSignal] = []
         if not self.cfg.smart_trade_enabled:
             return signals, skipped
 
-        all_rows = self._rows(candles_5m)
+        current_time = pd.to_datetime(candle_time)
+        all_rows = all_rows[all_rows["datetime"] <= current_time]
         day_rows = all_rows[all_rows["date"] == trading_date].reset_index(drop=True)
         if day_rows.empty:
             return signals, skipped
-        current_time = pd.to_datetime(candle_time)
         matches = day_rows.index[day_rows["datetime"] == current_time].tolist()
         if not matches:
             return signals, skipped
         current_index = int(matches[-1])
         current_row = day_rows.iloc[current_index]
+        # Anchor zones are initialized on the first 09:15 candle and remain fixed
+        # for the complete active session.
+        self._previous_day_zones(all_rows, trading_date)
         if current_row["time"] < self.cfg.opening_range_end or current_row["time"] > self.cfg.no_fresh_trade_after:
             return signals, skipped
 
@@ -496,18 +513,15 @@ class SmartTradeEngine:
         # Layer 1: zones from completed previous sessions (computed once, cached)
         prev_zones = self._previous_day_zones(all_rows, trading_date) if trading_date is not None else []
 
-        # Layer 2: zones forming candle by candle from today's session
+        # Layer 2: persistent intraday zones refreshed after every configured
+        # number of completed candles.
         intraday_zones: list[SmartZone] = []
         if trading_date is not None:
             today_rows = all_rows[(all_rows["date"] == trading_date) & (all_rows["datetime"] <= as_of_ts)]
             if not today_rows.empty:
-                intraday_result = self.levels.calculate_smart_zones(today_rows, current_price=current_price, as_of=as_of)
-                intraday_zones = [
-                    zone for zone in intraday_result.zones
-                    if zone.score >= self.cfg.smart_trade_min_zone_score
-                    and zone.status != "broken"
-                    and zone.break_count <= self.cfg.smart_max_allowed_breaks
-                ]
+                anchor_index = self._intraday_refresh_anchor_index(len(today_rows) - 1)
+                if anchor_index is not None:
+                    intraday_zones = self._intraday_zone_snapshot(today_rows.reset_index(drop=True), anchor_index)
 
         # Merge both layers, prev day zones first (higher priority), dedup by zone_id
         seen_ids: set[str] = set()
@@ -517,6 +531,171 @@ class SmartTradeEngine:
                 seen_ids.add(zone.zone_id)
                 combined.append(zone)
         return combined
+
+    def zones_for_candle_rows(
+        self,
+        all_rows: pd.DataFrame,
+        trading_date: date,
+        candle_time: Any,
+    ) -> list[SmartZone]:
+        current_time = pd.to_datetime(candle_time)
+        visible = all_rows[all_rows["datetime"] <= current_time]
+        if visible.empty:
+            return []
+        history = self._history_before(visible, current_time)
+        current_price = float(visible.iloc[-1]["close"])
+        if not history.empty:
+            current_price = float(history.iloc[-1]["close"])
+        return self._known_zones(visible, current_price, current_time, trading_date)
+
+    def _intraday_zone_snapshot(self, day_rows: pd.DataFrame, anchor_index: int) -> list[SmartZone]:
+        anchor_index = max(0, min(int(anchor_index), len(day_rows) - 1))
+        anchor_time = pd.to_datetime(day_rows.iloc[anchor_index]["datetime"])
+        cached = self._intraday_zone_snapshots.get(anchor_time)
+        if cached is not None:
+            return cached
+
+        refresh_every = max(int(self.cfg.smart_trade_zone_refresh_candles), 1)
+        previous_anchor = anchor_index - refresh_every
+        existing = self._intraday_zone_snapshot(day_rows, previous_anchor) if previous_anchor >= refresh_every - 1 else []
+        retired: list[SmartZone] = []
+        if previous_anchor >= refresh_every - 1:
+            previous_time = pd.to_datetime(day_rows.iloc[previous_anchor]["datetime"])
+            retired = self._intraday_retired_zone_snapshots.get(previous_time, [])
+        visible = day_rows.iloc[: anchor_index + 1]
+        current_price = float(visible.iloc[-1]["close"])
+        result = self.levels.calculate_smart_zones(visible, current_price=current_price, as_of=anchor_time)
+        candidates = [
+            zone
+            for zone in result.zones
+            if zone.score >= self.cfg.smart_trade_min_zone_score
+            and (self._is_support(zone) or self._is_resistance(zone))
+        ]
+        snapshot, retired = self._update_intraday_zone_state(
+            existing,
+            candidates,
+            visible,
+            max(float(result.atr or 1.0), 1.0),
+            retired,
+        )
+        self._intraday_zone_snapshots[anchor_time] = snapshot
+        self._intraday_retired_zone_snapshots[anchor_time] = retired
+        return snapshot
+
+    def _update_intraday_zone_registry(
+        self,
+        existing: list[SmartZone],
+        candidates: list[SmartZone],
+        visible: pd.DataFrame,
+        atr: float,
+    ) -> list[SmartZone]:
+        registry, _ = self._update_intraday_zone_state(existing, candidates, visible, atr, [])
+        return registry
+
+    def _update_intraday_zone_state(
+        self,
+        existing: list[SmartZone],
+        candidates: list[SmartZone],
+        visible: pd.DataFrame,
+        atr: float,
+        retired: list[SmartZone],
+    ) -> tuple[list[SmartZone], list[SmartZone]]:
+        retired_zones = list(retired)
+        refreshed = [self._refresh_intraday_zone(zone, visible, atr) for zone in existing]
+        newly_retired = [zone for zone in refreshed if self._intraday_zone_is_weak(zone)]
+        retired_zones.extend(
+            zone
+            for zone in newly_retired
+            if not any(self._same_intraday_zone(zone, retired_zone, atr) for retired_zone in retired_zones)
+        )
+        registry = [zone for zone in refreshed if not self._intraday_zone_is_weak(zone)]
+
+        for candidate in candidates:
+            if any(self._same_intraday_zone(candidate, retired_zone, atr) for retired_zone in retired_zones):
+                continue
+            match_index = next(
+                (
+                    index
+                    for index, zone in enumerate(registry)
+                    if self._same_intraday_zone(zone, candidate, atr)
+                ),
+                None,
+            )
+            if match_index is None:
+                if not self._intraday_zone_is_weak(candidate):
+                    registry.append(candidate)
+                continue
+
+            previous = registry[match_index]
+            touch_count = max(int(previous.touch_count), int(candidate.touch_count))
+            reaction_count = max(int(previous.reaction_count), int(candidate.reaction_count))
+            break_count = max(int(previous.break_count), int(candidate.break_count))
+            registry[match_index] = replace(
+                candidate,
+                zone_id=previous.zone_id,
+                created_at=min(pd.to_datetime(previous.created_at), pd.to_datetime(candidate.created_at)),
+                touch_count=touch_count,
+                reaction_count=reaction_count,
+                break_count=break_count,
+                status=self.levels._status(touch_count, break_count),
+            )
+
+        newly_retired = [zone for zone in registry if self._intraday_zone_is_weak(zone)]
+        retired_zones.extend(
+            zone
+            for zone in newly_retired
+            if not any(self._same_intraday_zone(zone, retired_zone, atr) for retired_zone in retired_zones)
+        )
+        registry = [zone for zone in registry if not self._intraday_zone_is_weak(zone)]
+        return sorted(registry, key=lambda zone: float(zone.score), reverse=True), retired_zones
+
+    def _refresh_intraday_zone(self, zone: SmartZone, visible: pd.DataFrame, atr: float) -> SmartZone:
+        created_at = pd.to_datetime(zone.created_at)
+        after = visible[visible["datetime"] > created_at]
+        direction = "bullish" if self._is_support(zone) else "bearish"
+        touch_count, reaction_count, break_count, last_touched_at, _ = self.levels._zone_behavior(
+            after,
+            float(zone.low),
+            float(zone.high),
+            direction,
+            atr,
+        )
+        touch_count = max(int(zone.touch_count), int(touch_count))
+        reaction_count = max(int(zone.reaction_count), int(reaction_count))
+        break_count = max(int(zone.break_count), int(break_count))
+        return replace(
+            zone,
+            last_touched_at=last_touched_at or zone.last_touched_at,
+            touch_count=touch_count,
+            reaction_count=reaction_count,
+            break_count=break_count,
+            status=self.levels._status(touch_count, break_count),
+        )
+
+    def _intraday_zone_is_weak(self, zone: SmartZone) -> bool:
+        min_touches = max(int(getattr(self.cfg, "smart_trade_zone_remove_min_touches", 3) or 3), 1)
+        min_breaks = max(int(getattr(self.cfg, "smart_trade_zone_remove_min_breaks", 1) or 1), 1)
+        return int(zone.touch_count) >= min_touches and int(zone.break_count) >= min_breaks
+
+    def _same_intraday_zone(self, first: SmartZone, second: SmartZone, atr: float) -> bool:
+        if first.zone_id == second.zone_id:
+            return True
+        same_side = (self._is_support(first) and self._is_support(second)) or (
+            self._is_resistance(first) and self._is_resistance(second)
+        )
+        if not same_side:
+            return False
+        overlap = max(0.0, min(float(first.high), float(second.high)) - max(float(first.low), float(second.low)))
+        narrower_width = max(min(float(first.high) - float(first.low), float(second.high) - float(second.low)), 0.01)
+        midpoint_distance = abs(float(first.midpoint) - float(second.midpoint))
+        return overlap / narrower_width >= 0.5 or midpoint_distance <= max(float(atr) * 0.25, 1.0)
+
+    def _intraday_refresh_anchor_index(self, current_index: int) -> int | None:
+        refresh_every = max(int(self.cfg.smart_trade_zone_refresh_candles), 1)
+        completed_candles = int(current_index) + 1
+        if completed_candles < refresh_every:
+            return None
+        return (completed_candles // refresh_every) * refresh_every - 1
 
     def _previous_day_zones(self, all_rows: pd.DataFrame, trading_date: date) -> list[SmartZone]:
         cached = self._prev_day_zones_cache.get(trading_date)
@@ -588,7 +767,9 @@ class SmartTradeEngine:
         touched = bool(((window["low"] <= zone.high) & (window["high"] >= zone.low)).any())
         if not touched:
             return None
-        if self._is_support(zone) and trend == "up" and close > open_price and close > zone.low:
+        previous = day_rows.iloc[max(0, confirm_index - 2) : confirm_index]
+        breaks_minor_high = bool(not previous.empty and float(confirm_row["high"]) > float(previous["high"].max()))
+        if self._is_support(zone) and trend == "up" and close > open_price and close > zone.high and breaks_minor_high:
             return ("SMART_ZONE_TREND_CONTINUATION", "CE", "trend_continuation")
         if self._is_resistance(zone) and trend == "down" and close < open_price and close < zone.high:
             return ("SMART_ZONE_TREND_CONTINUATION", "PE", "trend_continuation")
@@ -708,6 +889,23 @@ class SmartTradeEngine:
                 "zone": zone.to_dict(),
                 "htf_bias": htf_context,
                 "entry_model": entry_model,
+            }
+        if setup == "SMART_ZONE_TREND_CONTINUATION" and str(row["time"]) >= self.cfg.smart_trade_block_continuation_after:
+            return None, "Trend continuation blocked after late-session cutoff", {
+                "zone": zone.to_dict(),
+                "entry_model": entry_model,
+                "cutoff": self.cfg.smart_trade_block_continuation_after,
+            }
+        if (
+            direction == "CE"
+            and setup in {"SMART_ZONE_SUPPORT_REACTION_CONFIRMATION", "SMART_ZONE_TREND_CONTINUATION"}
+            and str(row["time"]) >= self.cfg.smart_trade_late_strength_start
+            and not self._late_ce_support_confirmation_ok(disp, structure)
+        ):
+            return None, "Late CE support setup needs fresh bullish structure or displacement", {
+                "zone": zone.to_dict(),
+                "entry_model": entry_model,
+                "time": row["time"],
             }
 
         # Quality is one uniform confluence threshold for all setups. Weak setups
@@ -860,6 +1058,12 @@ class SmartTradeEngine:
                 }
             )
         return out
+
+    @staticmethod
+    def _late_ce_support_confirmation_ok(disp: dict[str, Any], structure: dict[str, Any]) -> bool:
+        bullish_structure = bool(structure.get("is_structure_break") and structure.get("direction") == "bullish")
+        bullish_displacement = bool(disp.get("direction") == "bullish")
+        return bullish_structure or bullish_displacement
 
     def _reduced_zone_sl(self, setup: str, direction: str, zone: SmartZone, entry: float, buffer: float, structural_sl: float) -> float:
         if setup not in {"SMART_ZONE_BREAK_CONFIRMATION", "SMART_ZONE_RETEST_CONFIRMATION"}:
@@ -1025,13 +1229,8 @@ class SmartTradeEngine:
     ) -> tuple[list[SmartZone], float]:
         if day_rows.empty:
             return [], 0.0
-        opening_candidates = day_rows.index[day_rows["time"] >= self.cfg.opening_range_end].tolist()
-        opening_index = int(opening_candidates[0]) if opening_candidates else 0
-        refresh_every = max(int(self.cfg.smart_trade_zone_refresh_candles), 1)
-        if event_index < opening_index:
-            anchor_index = event_index
-        else:
-            anchor_index = opening_index + ((event_index - opening_index) // refresh_every) * refresh_every
+        intraday_anchor = self._intraday_refresh_anchor_index(event_index)
+        anchor_index = 0 if intraday_anchor is None else intraday_anchor
         anchor_index = max(0, min(anchor_index, len(day_rows) - 1))
         as_of = pd.to_datetime(day_rows.iloc[anchor_index]["datetime"])
         cached = self._snapshot_cache.get(as_of)

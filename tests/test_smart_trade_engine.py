@@ -23,6 +23,97 @@ def test_trade_zone_history_lookback_is_two_days() -> None:
     assert StrategyConfig().smart_trade_zone_history_days == 2
 
 
+def test_intraday_zone_refresh_defaults_to_six_completed_candles() -> None:
+    cfg = StrategyConfig()
+    engine = SmartTradeEngine(cfg)
+
+    assert cfg.smart_trade_zone_refresh_candles == 6
+    assert engine._intraday_refresh_anchor_index(0) is None
+    assert engine._intraday_refresh_anchor_index(4) is None
+    assert engine._intraday_refresh_anchor_index(5) == 5
+    assert engine._intraday_refresh_anchor_index(10) == 5
+    assert engine._intraday_refresh_anchor_index(11) == 11
+
+
+def test_anchor_zones_initialize_on_0915_candle() -> None:
+    engine = SmartTradeEngine(_test_config())
+    rows = engine._rows(
+        pd.DataFrame(
+            [
+                _candle(pd.Timestamp("2024-01-01 09:15"), 100, 105, 95, 101),
+                _candle(pd.Timestamp("2024-01-02 09:15"), 101, 106, 96, 102),
+                _candle(pd.Timestamp("2024-01-03 09:15"), 102, 107, 97, 103),
+            ]
+        )
+    )
+    calls: list[pd.Timestamp] = []
+
+    def track_anchor_zones(all_rows, trading_date):
+        calls.append(pd.to_datetime(all_rows.iloc[-1]["datetime"]))
+        return []
+
+    engine._previous_day_zones = track_anchor_zones  # type: ignore[method-assign]
+    engine.generate_for_candle_rows(
+        rows,
+        _levels(),
+        pd.Timestamp("2024-01-03").date(),
+        pd.Timestamp("2024-01-03 09:15"),
+    )
+
+    assert calls == [pd.Timestamp("2024-01-03 09:15")]
+
+
+def test_intraday_zone_persists_when_missing_from_new_detection_snapshot() -> None:
+    engine = SmartTradeEngine(_test_config())
+    zone = _zone("swing_low", 100, 120, score=80)
+    visible = pd.DataFrame(
+        [_candle(pd.Timestamp("2024-01-01 09:30"), 130, 135, 125, 132)]
+    )
+
+    registry = engine._update_intraday_zone_registry([zone], [], visible, atr=10)
+
+    assert [item.zone_id for item in registry] == [zone.zone_id]
+
+
+def test_intraday_zone_removal_requires_repeated_touches_and_a_break() -> None:
+    engine = SmartTradeEngine(_test_config())
+    visible = pd.DataFrame(
+        [_candle(pd.Timestamp("2024-01-01 09:30"), 130, 135, 125, 132)]
+    )
+    broken_once = replace(_zone("swing_low", 100, 120, score=80), touch_count=1, break_count=1)
+    touched_often = replace(_zone("swing_low", 200, 220, score=80), touch_count=3, break_count=0)
+    weak = replace(_zone("swing_low", 300, 320, score=80), touch_count=3, break_count=1)
+
+    registry = engine._update_intraday_zone_registry(
+        [broken_once, touched_often, weak],
+        [],
+        visible,
+        atr=10,
+    )
+
+    assert {item.zone_id for item in registry} == {broken_once.zone_id, touched_often.zone_id}
+
+
+def test_retired_intraday_zone_cannot_reappear_during_same_session() -> None:
+    engine = SmartTradeEngine(_test_config())
+    visible = pd.DataFrame(
+        [_candle(pd.Timestamp("2024-01-01 09:30"), 130, 135, 125, 132)]
+    )
+    weak = replace(_zone("swing_low", 100, 120, score=80), touch_count=3, break_count=1)
+    rediscovered = replace(weak, touch_count=0, break_count=0, status="fresh")
+
+    registry, retired = engine._update_intraday_zone_state(
+        [weak],
+        [rediscovered],
+        visible,
+        atr=10,
+        retired=[],
+    )
+
+    assert registry == []
+    assert [zone.zone_id for zone in retired] == [weak.zone_id]
+
+
 def test_smart_trade_history_uses_previous_two_trading_days() -> None:
     engine = SmartTradeEngine(_test_config())
     rows = _history_rows(
@@ -149,7 +240,7 @@ def test_trend_continuation_detects_bullish_pullback() -> None:
     zone = _zone("swing_low+breakout_base", 100, 120, score=90)
     rows = [
         _candle(pd.Timestamp("2024-01-01 09:15"), 122, 126, 121, 124),
-        _candle(pd.Timestamp("2024-01-01 09:20"), 105, 120, 103, 118),
+        _candle(pd.Timestamp("2024-01-01 09:20"), 105, 128, 103, 122),
     ]
     frame = pd.DataFrame(rows)
     frame["date"] = frame["datetime"].dt.date
@@ -166,6 +257,56 @@ def test_trend_continuation_detects_bullish_pullback() -> None:
     assert engine._trend_continuation_setup(zone, day_rows, confirm_index, "range") is None
     disabled = SmartTradeEngine(_test_config_with(smart_trade_continuation_enabled=False))
     assert disabled._trend_continuation_setup(zone, day_rows, confirm_index, "up") is None
+
+
+def test_trend_continuation_requires_bullish_reclaim_above_zone() -> None:
+    engine = SmartTradeEngine(_test_config())
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    rows = [
+        _candle(pd.Timestamp("2024-01-01 09:15"), 122, 126, 121, 124),
+        _candle(pd.Timestamp("2024-01-01 09:20"), 105, 128, 103, 118),
+    ]
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["datetime"].dt.date
+    frame["time"] = frame["datetime"].dt.strftime("%H:%M")
+    day_rows = engine._rows(frame)
+
+    assert engine._trend_continuation_setup(zone, day_rows, len(day_rows) - 1, "up") is None
+
+
+def test_late_trend_continuation_is_blocked() -> None:
+    engine = SmartTradeEngine(_test_config())
+    zone = _zone("swing_low+breakout_base", 100, 120, score=90)
+    rows = [
+        _candle(pd.Timestamp("2024-01-01 13:25"), 122, 126, 121, 124),
+        _candle(pd.Timestamp("2024-01-01 13:35"), 105, 128, 103, 122),
+    ]
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["datetime"].dt.date
+    frame["time"] = frame["datetime"].dt.strftime("%H:%M")
+    all_rows = engine._rows(frame)
+    day_rows = all_rows[all_rows["date"] == pd.Timestamp("2024-01-01").date()].reset_index(drop=True)
+    row_index = len(day_rows) - 1
+    row = day_rows.iloc[row_index]
+
+    signal, reason, _ = engine._build_signal(
+        direction="CE",
+        setup="SMART_ZONE_TREND_CONTINUATION",
+        all_rows=all_rows,
+        day_rows=day_rows,
+        row_index=row_index,
+        row=row,
+        break_row=row,
+        zone=zone,
+        levels=_levels(),
+        atr=10,
+        entry_model="trend_continuation",
+        htf_context=_aligned_htf("bullish"),
+        target_zones=[zone],
+    )
+
+    assert signal is None
+    assert reason == "Trend continuation blocked after late-session cutoff"
 
 
 def test_trend_continuation_emits_with_aligned_htf() -> None:
