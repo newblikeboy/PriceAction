@@ -64,7 +64,7 @@ class BacktestRunner:
             for candle_time, row in day_rows.iterrows():
                 if row["time"] < self.cfg.opening_range_end:
                     continue
-                if row["time"] > self.cfg.no_fresh_trade_after:
+                if row["time"] >= self.cfg.no_fresh_trade_after:
                     continue
                 if open_until is not None and pd.to_datetime(candle_time) <= open_until:
                     continue

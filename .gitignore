@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 data/fyers_auth.json
+data/angel_futures_contracts.json
 
 # Python generated files
 __pycache__/

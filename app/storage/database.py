@@ -246,6 +246,7 @@ class Database:
             "angel_one_exchanged_at": "BIGINT",
             "angel_trading_enabled": "TINYINT(1) NOT NULL DEFAULT 0",
             "angel_lot_count": "INT NOT NULL DEFAULT 1",
+            "angel_execution_instrument": "VARCHAR(16) NOT NULL DEFAULT 'FUTURE'",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -332,6 +333,7 @@ class Database:
             "token_exchanged_at": user.get("angel_one_exchanged_at"),
             "trading_enabled": bool(user.get("angel_trading_enabled")),
             "lot_count": int(user.get("angel_lot_count") or 1),
+            "execution_instrument": self._execution_instrument(user.get("angel_execution_instrument")),
         }
 
     def get_user_angel_session(self, username: str) -> dict[str, Any] | None:
@@ -350,7 +352,13 @@ class Database:
             "connected": bool(user.get("angel_one_connected")),
             "trading_enabled": bool(user.get("angel_trading_enabled")),
             "lot_count": int(user.get("angel_lot_count") or 1),
+            "execution_instrument": self._execution_instrument(user.get("angel_execution_instrument")),
         }
+
+    @staticmethod
+    def _execution_instrument(value: Any) -> str:
+        mode = str(value or "FUTURE").strip().upper()
+        return mode if mode in {"FUTURE", "OPTION"} else "FUTURE"
 
     def set_user_broker_profile(
         self,
@@ -362,10 +370,16 @@ class Database:
         totp_secret: str | None = None,
         trading_enabled: bool | None = None,
         lot_count: int | None = None,
+        execution_instrument: str | None = None,
     ) -> None:
         existing = self.broker_config(username)
         next_trading_enabled = existing.get("trading_enabled") if trading_enabled is None else bool(trading_enabled)
         next_lot_count = existing.get("lot_count") if lot_count is None else max(1, int(lot_count or 1))
+        next_execution_instrument = (
+            existing.get("execution_instrument")
+            if execution_instrument is None
+            else self._execution_instrument(execution_instrument)
+        )
         with self.connect() as db:
             with db.cursor() as cursor:
                 cursor.execute(
@@ -376,7 +390,8 @@ class Database:
                         angel_one_pin = COALESCE(NULLIF(%s, ''), angel_one_pin),
                         angel_one_totp_secret = COALESCE(NULLIF(%s, ''), angel_one_totp_secret),
                         angel_trading_enabled = %s,
-                        angel_lot_count = %s
+                        angel_lot_count = %s,
+                        angel_execution_instrument = %s
                     WHERE username = %s
                     """,
                     (
@@ -386,6 +401,7 @@ class Database:
                         (totp_secret or "").strip().replace(" ", ""),
                         1 if next_trading_enabled else 0,
                         max(1, int(next_lot_count or 1)),
+                        next_execution_instrument,
                         username,
                     ),
                 )
@@ -499,7 +515,8 @@ class Database:
                            angel_one_access_token AS access_token,
                            angel_one_feed_token AS feed_token,
                            angel_one_refresh_token AS refresh_token,
-                           angel_lot_count AS lot_count
+                           angel_lot_count AS lot_count,
+                           angel_execution_instrument AS execution_instrument
                     FROM users
                     WHERE angel_one_connected = 1
                       AND angel_trading_enabled = 1
@@ -569,6 +586,11 @@ class Database:
                         entry_side, entry_order_id, status, entry_response_json
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
+                        symbol = VALUES(symbol),
+                        token = VALUES(token),
+                        exchange = VALUES(exchange),
+                        quantity = VALUES(quantity),
+                        entry_side = VALUES(entry_side),
                         entry_order_id = VALUES(entry_order_id),
                         status = VALUES(status),
                         entry_response_json = VALUES(entry_response_json)
@@ -586,6 +608,15 @@ class Database:
                         json.dumps(response_payload or {}, default=str),
                     ),
                 )
+
+    def list_angel_live_orders(self, paper_trade_id: int) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM angel_live_orders WHERE paper_trade_id = %s ORDER BY opened_at ASC",
+                    (int(paper_trade_id),),
+                )
+                return list(cursor.fetchall())
 
     def list_open_angel_live_orders(self, paper_trade_id: int | None = None) -> list[dict[str, Any]]:
         with self.connect() as db:

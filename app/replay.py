@@ -201,7 +201,7 @@ class ReplayBarSession:
         self._activate_pending_signal(ts)
         if self.pending_signal is not None:
             return
-        if str(row["time"]) < self.cfg.opening_range_end or str(row["time"]) > self.cfg.no_fresh_trade_after:
+        if str(row["time"]) < self.cfg.opening_range_end or str(row["time"]) >= self.cfg.no_fresh_trade_after:
             return
 
         visible = self.engine_candles()

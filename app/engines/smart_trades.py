@@ -59,7 +59,7 @@ class SmartTradeEngine:
         cached_zones = self._previous_day_zones(all_rows, trading_date)
         last_zone_anchor: int | None | object = object()
         for break_index, break_row in day_rows.iterrows():
-            if break_row["time"] < self.cfg.opening_range_end or break_row["time"] > self.cfg.no_fresh_trade_after:
+            if break_row["time"] < self.cfg.opening_range_end or break_row["time"] >= self.cfg.no_fresh_trade_after:
                 continue
             global_break_index = int(break_row["global_index"])
             history = self._history_before(all_rows, break_row["datetime"])
@@ -197,7 +197,7 @@ class SmartTradeEngine:
         # Anchor zones are initialized on the first 09:15 candle and remain fixed
         # for the complete active session.
         self._previous_day_zones(all_rows, trading_date)
-        if current_row["time"] < self.cfg.opening_range_end or current_row["time"] > self.cfg.no_fresh_trade_after:
+        if current_row["time"] < self.cfg.opening_range_end or current_row["time"] >= self.cfg.no_fresh_trade_after:
             return signals, skipped
 
         seen: set[tuple[str, str, str]] = set()
@@ -807,7 +807,7 @@ class SmartTradeEngine:
         end = min(len(rows), break_index + 1 + self.cfg.smart_trade_confirmation_window_candles)
         for index in range(break_index + 1, end):
             row = rows.iloc[index]
-            if row["time"] > self.cfg.no_fresh_trade_after:
+            if row["time"] >= self.cfg.no_fresh_trade_after:
                 return None
             if self._confirms(row, zone, direction):
                 return index
@@ -817,7 +817,7 @@ class SmartTradeEngine:
         end = min(len(rows), confirm_index + 1 + self.cfg.smart_trade_retest_window_candles)
         for index in range(confirm_index + 1, end):
             row = rows.iloc[index]
-            if row["time"] > self.cfg.no_fresh_trade_after:
+            if row["time"] >= self.cfg.no_fresh_trade_after:
                 return None
             touched = float(row["low"]) <= zone.high and float(row["high"]) >= zone.low
             if touched and self._confirms(row, zone, direction):
@@ -829,7 +829,7 @@ class SmartTradeEngine:
         if next_index >= len(rows):
             return None
         row = rows.iloc[next_index]
-        if row["time"] > self.cfg.no_fresh_trade_after:
+        if row["time"] >= self.cfg.no_fresh_trade_after:
             return None
         return next_index if self._confirms(row, zone, direction) else None
 

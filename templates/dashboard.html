@@ -302,11 +302,19 @@
               <div class="profile-row"><span>Saved API Key</span><strong id="broker-api-key-status">--</strong></div>
               <div class="profile-row"><span>Saved PIN</span><strong id="broker-pin-status">--</strong></div>
               <div class="profile-row"><span>Saved TOTP Secret</span><strong id="broker-totp-status">--</strong></div>
+              <div class="profile-row"><span>Execution Contract</span><strong id="broker-execution-instrument-status">FUTURE</strong></div>
             </div>
             <label class="field"><span>Angel Client ID</span><input id="broker-client-id-input" class="text-input" autocomplete="off"></label>
             <label class="field"><span>API Key</span><input id="broker-api-key-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved key"></label>
             <label class="field"><span>PIN</span><input id="broker-pin-input" class="text-input" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved PIN"></label>
             <label class="field"><span>TOTP Secret</span><input id="broker-totp-input" class="text-input" autocomplete="off" placeholder="Leave blank to keep saved secret"></label>
+            <label class="field">
+              <span>Execution Contract</span>
+              <select id="broker-execution-instrument-input" class="text-input">
+                <option value="FUTURE">NIFTY Future</option>
+                <option value="OPTION">NIFTY Option</option>
+              </select>
+            </label>
             <div class="action-row">
               <button id="broker-save-btn" class="action-btn" type="submit">Save / Update</button>
             </div>

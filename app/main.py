@@ -32,7 +32,7 @@ from app.engines.levels import LevelEngine
 from app.engines.signals import SignalEngine
 from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_market_hours_status
 from app.options_pricing import select_option_contract, to_float, to_int
-from app.paper_trading import PaperTradeEngine
+from app.paper_trading import PaperTradeEngine, failed_zone_ids_from_trades, filter_failed_zone_signals
 from app.replay import ReplayBarSession
 from app.zone_detection import ZoneDetectionSession
 from app.services import StrategyService
@@ -158,6 +158,7 @@ class BrokerProfilePayload(BaseModel):
     totp_secret: str | None = None
     trading_enabled: bool | None = None
     lot_count: int | None = None
+    execution_instrument: str | None = None
 
 
 class TradingEnginePayload(BaseModel):
@@ -404,6 +405,7 @@ def ensure_market_data_scheduler() -> None:
 def start_background_workers() -> None:
     ensure_fyers_token_scheduler()
     ensure_market_data_scheduler()
+    get_angel_execution().warm_future_contracts()
 
 
 @app.on_event("shutdown")
@@ -1273,6 +1275,30 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
         paper = PaperTradeEngine()
         saved_trades = 0
         saved_skipped = 0
+        same_day_trades = db.list_trades_between(
+            trading_date.isoformat(),
+            trading_date.isoformat(),
+            symbol=LIVE_DB_SYMBOL,
+            include_backtests=False,
+        )
+        signals, failed_zone_signals = filter_failed_zone_signals(
+            signals,
+            failed_zone_ids_from_trades(same_day_trades),
+            paper.cfg,
+        )
+        for signal in failed_zone_signals:
+            zone = signal.features.get("smart_zone") if isinstance(signal.features, dict) else None
+            zone_id = str(zone.get("zone_id")) if isinstance(zone, dict) and zone.get("zone_id") else None
+            skipped_signal = SkippedSignal(
+                signal.date,
+                str(signal.features.get("time") or signal.time),
+                signal.direction,
+                signal.setup_type,
+                "Zone blocked after same-day losing trade",
+                {"zone_id": zone_id},
+            )
+            if db.insert_skipped_if_absent(skipped_signal.to_dict()) is not None:
+                saved_skipped += 1
         for signal in signals:
             if db.list_open_trades(LIVE_DB_SYMBOL, limit=1):
                 skipped_signal = SkippedSignal(
@@ -1425,20 +1451,18 @@ def update_live_open_trades(
         except Exception:
             pass
 
-        close_price: float | None = None
-        reason = ""
         target = to_float(trade.get("target_index_price"), 0.0)
-        stop_reason = "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT"
-        if direction == "CE":
-            if underlying_price <= active_sl:
-                close_price, reason = active_sl, stop_reason
-            elif underlying_price >= target:
-                close_price, reason = target, "TARGET_HIT"
-        elif direction == "PE":
-            if underlying_price >= active_sl:
-                close_price, reason = active_sl, stop_reason
-            elif underlying_price <= target:
-                close_price, reason = target, "TARGET_HIT"
+        decision = paper_engine.exit_decision_for_quote(
+            direction=direction,
+            quote_price=underlying_price,
+            active_sl=active_sl,
+            target_price=target,
+            entry_price=underlying_entry,
+            reward_points=to_float(trade.get("reward_points"), abs(target - underlying_entry)),
+            breakeven_active=breakeven_active,
+            profit_lock_active=profit_lock_active,
+        )
+        close_price, reason = decision if decision is not None else (None, "")
         if allow_time_exit and close_price is None and tick_time.strftime("%H:%M") >= PaperTradeEngine().cfg.square_off_time:
             close_price, reason = underlying_price, "TIME_EXIT"
         if close_price is None:
@@ -2318,6 +2342,7 @@ def api_user_broker_save(payload: BrokerProfilePayload, user: dict[str, Any] = D
         totp_secret=payload.totp_secret,
         trading_enabled=payload.trading_enabled,
         lot_count=payload.lot_count,
+        execution_instrument=payload.execution_instrument,
     )
     runtime_cache_clear(f"user:{user['username']}")
     return {"ok": True, "broker": get_angel_execution().status(str(user["username"]))}

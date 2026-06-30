@@ -1,12 +1,59 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable
+import json
+from typing import Any, Iterable
 
 import pandas as pd
 
 from app.config import StrategyConfig, config
 from app.domain import PaperTrade, SignalCandidate
+
+
+ZONE_LOSS_COOLDOWN_SETUPS = {
+    "SMART_ZONE_BREAK_CONFIRMATION",
+    "SMART_ZONE_TREND_CONTINUATION",
+}
+
+
+def failed_zone_ids_from_trades(trades: Iterable[dict[str, Any]]) -> set[str]:
+    zone_ids: set[str] = set()
+    for trade in trades:
+        if str(trade.get("result") or "").upper() != "LOSS":
+            continue
+        features: Any = trade.get("features")
+        if not isinstance(features, dict):
+            features = trade.get("features_json")
+        if isinstance(features, str):
+            try:
+                features = json.loads(features)
+            except (TypeError, json.JSONDecodeError):
+                features = {}
+        zone = features.get("smart_zone") if isinstance(features, dict) else None
+        zone_id = zone.get("zone_id") if isinstance(zone, dict) else None
+        if zone_id:
+            zone_ids.add(str(zone_id))
+    return zone_ids
+
+
+def filter_failed_zone_signals(
+    signals: Iterable[SignalCandidate],
+    failed_zone_ids: set[str],
+    cfg: StrategyConfig = config,
+) -> tuple[list[SignalCandidate], list[SignalCandidate]]:
+    allowed: list[SignalCandidate] = []
+    blocked: list[SignalCandidate] = []
+    for signal in signals:
+        zone = signal.features.get("smart_zone") if isinstance(signal.features, dict) else None
+        zone_id = str(zone.get("zone_id")) if isinstance(zone, dict) and zone.get("zone_id") else None
+        should_block = (
+            cfg.smart_trade_zone_loss_cooldown_enabled
+            and signal.setup_type in ZONE_LOSS_COOLDOWN_SETUPS
+            and zone_id is not None
+            and zone_id in failed_zone_ids
+        )
+        (blocked if should_block else allowed).append(signal)
+    return allowed, blocked
 
 
 class PaperTradeEngine:
@@ -37,6 +84,39 @@ class PaperTradeEngine:
         ts = quote_time or datetime.now()
         row = pd.Series({"high": quote_price, "low": quote_price, "close": quote_price, "time": ts.strftime("%H:%M")})
         return self.update_open_trade_with_candle(trade, ts, row)
+
+    def exit_decision_for_quote(
+        self,
+        *,
+        direction: str,
+        quote_price: float,
+        active_sl: float,
+        target_price: float,
+        entry_price: float,
+        reward_points: float,
+        breakeven_active: bool = False,
+        profit_lock_active: bool = False,
+    ) -> tuple[float, str] | None:
+        stop_reason = "PROFIT_LOCK_HIT" if profit_lock_active else "BREAKEVEN_HIT" if breakeven_active else "SL_HIT"
+        near_target_pct = float(getattr(self.cfg, "paper_near_target_exit_pct", 0.0) or 0.0)
+        near_target_pct = min(max(near_target_pct, 0.0), 1.0)
+        if direction == "CE":
+            if quote_price <= active_sl:
+                return active_sl, stop_reason
+            if quote_price >= target_price:
+                return target_price, "TARGET_HIT"
+            near_target = entry_price + (reward_points * near_target_pct)
+            if near_target_pct > 0 and quote_price >= near_target:
+                return near_target, "NEAR_TARGET_EXIT"
+        elif direction == "PE":
+            if quote_price >= active_sl:
+                return active_sl, stop_reason
+            if quote_price <= target_price:
+                return target_price, "TARGET_HIT"
+            near_target = entry_price - (reward_points * near_target_pct)
+            if near_target_pct > 0 and quote_price <= near_target:
+                return near_target, "NEAR_TARGET_EXIT"
+        return None
 
     def simulate_trade(self, trade: PaperTrade, candles_5m: pd.DataFrame) -> PaperTrade:
         # Backtest drives the trade candle-by-candle through the exact same update

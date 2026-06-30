@@ -40,12 +40,14 @@
   const brokerApiKeyStatus = document.getElementById("broker-api-key-status");
   const brokerPinStatus = document.getElementById("broker-pin-status");
   const brokerTotpStatus = document.getElementById("broker-totp-status");
+  const brokerExecutionInstrumentStatus = document.getElementById("broker-execution-instrument-status");
   const brokerLotSizeStatus = document.getElementById("broker-lot-size-status");
   const brokerOrderQuantityStatus = document.getElementById("broker-order-quantity-status");
   const brokerClientIdInput = document.getElementById("broker-client-id-input");
   const brokerApiKeyInput = document.getElementById("broker-api-key-input");
   const brokerPinInput = document.getElementById("broker-pin-input");
   const brokerTotpInput = document.getElementById("broker-totp-input");
+  const brokerExecutionInstrumentInput = document.getElementById("broker-execution-instrument-input");
   const brokerLotCountInput = document.getElementById("broker-lot-count-input");
   const brokerTradingEnabledInput = document.getElementById("broker-trading-enabled-input");
   const brokerSaveBtn = document.getElementById("broker-save-btn");
@@ -258,6 +260,7 @@
     setText(brokerApiKeyStatus, broker.api_key_masked || "Not saved");
     setText(brokerPinStatus, broker.pin_saved ? "Saved" : "Not saved");
     setText(brokerTotpStatus, broker.totp_saved ? "Saved" : "Not saved");
+    setText(brokerExecutionInstrumentStatus, broker.execution_instrument || "FUTURE");
     setText(brokerLotSizeStatus, String(broker.default_lot_size || "--"));
     setText(brokerOrderQuantityStatus, String(broker.order_quantity || "--"));
     setText(profileLotSizeQty, String(broker.default_lot_size || "--"));
@@ -275,6 +278,9 @@
     }
     if (brokerLotCountInput) {
       brokerLotCountInput.value = String(broker.lot_count || 1);
+    }
+    if (brokerExecutionInstrumentInput) {
+      brokerExecutionInstrumentInput.value = broker.execution_instrument || "FUTURE";
     }
     if (userLotCountInput) {
       userLotCountInput.value = String(broker.lot_count || 1);
@@ -549,6 +555,7 @@
         api_key: brokerApiKeyInput ? brokerApiKeyInput.value.trim() : "",
         pin: brokerPinInput ? brokerPinInput.value.trim() : "",
         totp_secret: brokerTotpInput ? brokerTotpInput.value.trim() : "",
+        execution_instrument: brokerExecutionInstrumentInput ? brokerExecutionInstrumentInput.value : "FUTURE",
       })
         .then(function () {
           setBrokerMessage("Broker profile saved.", false);

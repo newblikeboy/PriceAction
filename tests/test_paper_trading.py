@@ -6,7 +6,7 @@ import pandas as pd
 
 from app.config import StrategyConfig
 from app.domain import SignalCandidate
-from app.paper_trading import PaperTradeEngine
+from app.paper_trading import PaperTradeEngine, failed_zone_ids_from_trades, filter_failed_zone_signals
 
 
 def test_paper_trade_locks_profit_after_one_r() -> None:
@@ -89,3 +89,72 @@ def test_live_quote_stream_locks_profit_like_replay() -> None:
     assert trade.exit_reason == "PROFIT_LOCK_HIT"
     assert trade.exit_index_price == 105.0
     assert trade.r_multiple == 0.5
+
+
+def test_live_quote_exit_uses_same_near_target_rule_as_replay() -> None:
+    engine = PaperTradeEngine(StrategyConfig(paper_near_target_exit_pct=0.95))
+
+    ce_decision = engine.exit_decision_for_quote(
+        direction="CE",
+        quote_price=128.5,
+        active_sl=90.0,
+        target_price=130.0,
+        entry_price=100.0,
+        reward_points=30.0,
+    )
+    pe_decision = engine.exit_decision_for_quote(
+        direction="PE",
+        quote_price=71.5,
+        active_sl=110.0,
+        target_price=70.0,
+        entry_price=100.0,
+        reward_points=30.0,
+    )
+
+    assert ce_decision == (128.5, "NEAR_TARGET_EXIT")
+    assert pe_decision == (71.5, "NEAR_TARGET_EXIT")
+
+
+def test_live_failed_zone_cooldown_matches_replay_scope() -> None:
+    losing_trades = [
+        {
+            "result": "LOSS",
+            "features_json": '{"smart_zone": {"zone_id": "zone-1"}}',
+        },
+        {
+            "result": "WIN",
+            "features_json": '{"smart_zone": {"zone_id": "zone-2"}}',
+        },
+    ]
+    failed_zone_ids = failed_zone_ids_from_trades(losing_trades)
+    break_signal = _signal("SMART_ZONE_BREAK_CONFIRMATION", "zone-1")
+    continuation_signal = _signal("SMART_ZONE_TREND_CONTINUATION", "zone-1")
+    retest_signal = _signal("SMART_ZONE_RETEST_CONFIRMATION", "zone-1")
+    other_zone_signal = _signal("SMART_ZONE_BREAK_CONFIRMATION", "zone-2")
+
+    allowed, blocked = filter_failed_zone_signals(
+        [break_signal, continuation_signal, retest_signal, other_zone_signal],
+        failed_zone_ids,
+    )
+
+    assert failed_zone_ids == {"zone-1"}
+    assert blocked == [break_signal, continuation_signal]
+    assert allowed == [retest_signal, other_zone_signal]
+
+
+def _signal(setup_type: str, zone_id: str) -> SignalCandidate:
+    return SignalCandidate(
+        date="2024-01-01",
+        time="09:30",
+        symbol="NIFTY",
+        direction="CE",
+        setup_type=setup_type,
+        entry_index_price=100.0,
+        sl_index_price=90.0,
+        target_index_price=130.0,
+        risk_points=10.0,
+        reward_points=30.0,
+        risk_reward=3.0,
+        setup_score=80,
+        features={"smart_zone": {"zone_id": zone_id}},
+    )

@@ -92,7 +92,7 @@ class StrategyConfig:
     symbol: str = "NIFTY"
     opening_range_start: str = "09:15"
     opening_range_end: str = "09:30"
-    no_fresh_trade_after: str = "14:15"
+    no_fresh_trade_after: str = "14:00"
     square_off_time: str = "15:15"
     best_window_end: str = "11:00"
     continuation_window_end: str = "13:30"
@@ -171,6 +171,8 @@ class StrategyConfig:
     smart_trade_continuation_enabled: bool = True
     smart_trade_continuation_pullback_lookback: int = 4
     smart_trade_zone_loss_cooldown_enabled: bool = True
+    smart_trade_block_break_start: str = "11:00"
+    smart_trade_block_break_end: str = "13:00"
     smart_trade_late_strength_start: str = "12:00"
     smart_trade_block_continuation_after: str = "13:30"
     paper_breakeven_after_r: float = 1.0
