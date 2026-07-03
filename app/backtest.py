@@ -58,6 +58,15 @@ class BacktestRunner:
             )
         open_until: pd.Timestamp | None = None
         failed_zone_ids_by_date: dict[str, set[str]] = {}
+        # Normalize once for the whole run (same pattern as ReplaySession);
+        # generate_for_candle_rows self-filters to candles <= current time, so no
+        # future data can leak through the shared frame. Stub signal engines
+        # without the rows API (tests) fall back to the per-candle path.
+        engine_rows = (
+            self.signals.smart_trades._rows(candles_5m)
+            if hasattr(self.signals, "smart_trades") and hasattr(self.signals, "generate_for_candle_rows")
+            else None
+        )
         for index, trading_date in enumerate(trading_dates, start=1):
             failed_zone_ids = failed_zone_ids_by_date.setdefault(str(trading_date), set())
             day_rows = candles_5m[candles_5m["date"] == trading_date]
@@ -70,12 +79,20 @@ class BacktestRunner:
                     continue
                 visible_candles = candles_5m[candles_5m.index <= candle_time]
                 visible_levels = self.levels.calculate(visible_candles, trading_date)
-                candle_signals, candle_skipped = self.signals.generate_for_candle(
-                    visible_candles,
-                    visible_levels,
-                    trading_date,
-                    candle_time,
-                )
+                if engine_rows is not None:
+                    candle_signals, candle_skipped = self.signals.generate_for_candle_rows(
+                        engine_rows,
+                        visible_levels,
+                        trading_date,
+                        candle_time,
+                    )
+                else:
+                    candle_signals, candle_skipped = self.signals.generate_for_candle(
+                        visible_candles,
+                        visible_levels,
+                        trading_date,
+                        candle_time,
+                    )
                 skipped.extend(candle_skipped)
                 if not candle_signals:
                     continue

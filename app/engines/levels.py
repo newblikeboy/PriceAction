@@ -84,15 +84,36 @@ class LevelEngine:
         lows: list[dict[str, Any]] = []
         left = self.cfg.swing_left
         right = self.cfg.swing_right
-        rows = self._rows(candles)
-        for i in range(left, len(rows) - right):
-            row = rows.iloc[i]
-            left_rows = rows.iloc[i - left : i]
-            right_rows = rows.iloc[i + 1 : i + right + 1]
-            if row["high"] > left_rows["high"].max() and row["high"] > right_rows["high"].max():
-                highs.append({"time": row["datetime"], "price": float(row["high"]), "index": int(i)})
-            if row["low"] < left_rows["low"].min() and row["low"] < right_rows["low"].min():
-                lows.append({"time": row["datetime"], "price": float(row["low"]), "index": int(i)})
+        # Fast path: frames that already carry a datetime column or index (every
+        # engine-internal caller) skip the full _rows re-normalization.
+        if "datetime" in candles.columns:
+            rows = candles
+            times = rows["datetime"]
+        elif isinstance(candles.index, pd.DatetimeIndex):
+            rows = candles
+            times = candles.index.to_series().reset_index(drop=True)
+        else:
+            rows = self._rows(candles)
+            times = rows["datetime"]
+        if len(rows) <= left + right:
+            return {"highs": highs, "lows": lows}
+        high = pd.to_numeric(rows["high"], errors="coerce")
+        low = pd.to_numeric(rows["low"], errors="coerce")
+        high_values = high.to_numpy(dtype=float)
+        low_values = low.to_numpy(dtype=float)
+        # A swing high beats the `left` candles before it and the `right` candles
+        # after it (strict >, same bounds as the original per-row loop; the rolling
+        # min_periods leaves NaN at the edges, which compare False).
+        left_high = high.rolling(left).max().shift(1).to_numpy()
+        right_high = high[::-1].rolling(right).max().shift(1).to_numpy()[::-1]
+        left_low = low.rolling(left).min().shift(1).to_numpy()
+        right_low = low[::-1].rolling(right).min().shift(1).to_numpy()[::-1]
+        high_mask = (high_values > left_high) & (high_values > right_high)
+        low_mask = (low_values < left_low) & (low_values < right_low)
+        for i in high_mask.nonzero()[0]:
+            highs.append({"time": times.iloc[int(i)], "price": float(high_values[i]), "index": int(i)})
+        for i in low_mask.nonzero()[0]:
+            lows.append({"time": times.iloc[int(i)], "price": float(low_values[i]), "index": int(i)})
         return {"highs": highs, "lows": lows}
 
     def round_levels(self, price: float, count: int = 3) -> list[float]:

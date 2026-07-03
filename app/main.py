@@ -266,7 +266,42 @@ def refresh_fyers_access_token_job(source: str = "scheduler") -> bool:
         return False
 
 
+# A failed daily refresh must not leave the system tokenless for 24 hours:
+# retry every 15 minutes (up to 8 attempts), and refresh immediately on startup
+# when the saved access token is missing or about to expire.
+FYERS_TOKEN_RETRY_INTERVAL_SECONDS = 15 * 60
+FYERS_TOKEN_RETRY_LIMIT = 8
+FYERS_TOKEN_STARTUP_MIN_HOURS = 2.0
+
+
+def _fyers_token_needs_startup_refresh() -> bool:
+    try:
+        loader = get_loader()
+        if not loader.cfg.is_totp_configured:
+            return False
+        hours = loader.fyers_auth_token_status().get("access_token_hours_remaining")
+        if hours is None:
+            return True
+        return float(hours) < FYERS_TOKEN_STARTUP_MIN_HOURS
+    except Exception:
+        return False
+
+
+def _refresh_fyers_token_with_retries(source: str) -> None:
+    if refresh_fyers_access_token_job(source=source):
+        return
+    if not get_loader().cfg.is_totp_configured:
+        return
+    for attempt in range(1, FYERS_TOKEN_RETRY_LIMIT + 1):
+        if _fyers_token_scheduler_stop.wait(FYERS_TOKEN_RETRY_INTERVAL_SECONDS):
+            return
+        if refresh_fyers_access_token_job(source=f"{source}-retry-{attempt}"):
+            return
+
+
 def fyers_token_scheduler_worker() -> None:
+    if _fyers_token_needs_startup_refresh():
+        _refresh_fyers_token_with_retries("startup-catchup")
     while not _fyers_token_scheduler_stop.is_set():
         next_run = next_fyers_totp_refresh_time()
         with _fyers_token_scheduler_lock:
@@ -275,7 +310,7 @@ def fyers_token_scheduler_worker() -> None:
         wait_seconds = max(0.0, (next_run - datetime.now(IST)).total_seconds())
         if _fyers_token_scheduler_stop.wait(wait_seconds):
             break
-        refresh_fyers_access_token_job()
+        _refresh_fyers_token_with_retries("scheduler")
     with _fyers_token_scheduler_lock:
         _fyers_token_scheduler_status["running"] = False
 
@@ -2084,7 +2119,7 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
         return payload
 
 
-def warm_admin_chart_cache(symbol: str = "NIFTY", days: int = 30) -> None:
+def warm_admin_chart_cache(symbol: str = "NIFTY", days: int = 3) -> None:
     global _chart_warm_running
     with _chart_warm_lock:
         if _chart_warm_running:
@@ -2890,7 +2925,7 @@ def api_admin_start_live_trade_monitor(
 def api_admin_live_chart(
     timeframe: str = "5m",
     symbol: str = "NIFTY",
-    days: int = 90,
+    days: int = 3,
     live: bool = True,
 ) -> dict[str, Any]:
     if timeframe != "5m":

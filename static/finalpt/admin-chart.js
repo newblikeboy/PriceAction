@@ -30,7 +30,7 @@
   let zoneRedrawTimer = null;
 
   function cacheKey() {
-    return `priceAction.chart.${timeframe}.30`;
+    return `priceAction.chart.${timeframe}.3`;
   }
 
   const chart = LightweightCharts.createChart(chartEl, {
@@ -376,7 +376,7 @@
       }
     }
     fullRequestInFlight = true;
-    fetch(`/api/admin/live-chart?timeframe=${encodeURIComponent(timeframe)}&days=30&live=true`, {
+    fetch(`/api/admin/live-chart?timeframe=${encodeURIComponent(timeframe)}&days=3&live=true`, {
       headers: { Accept: "application/json", "X-Requested-With": "fetch" },
     })
       .then(function (response) {
