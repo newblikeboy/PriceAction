@@ -2412,6 +2412,110 @@ def api_admin_execution_lot_size_save(
     return {"ok": True, "lot_size_qty": lot_size_qty}
 
 
+# V2 engine freeze date: no strategy/config tuning is allowed after this date.
+# The monitoring gate measures FORWARD paper trades only (entered on/after this date).
+V2_FREEZE_DATE = "2026-07-03"
+
+# Pre-registered go-live gate (set before forward data existed — do not adjust
+# these thresholds after seeing results):
+MONITORING_MIN_TRADES = 60
+MONITORING_MIN_DAYS = 60
+MONITORING_MIN_MEAN_R_AFTER_COST = 0.03
+MONITORING_MAX_DRAWDOWN_R = -16.0
+MONITORING_COST_POINTS_PER_TRADE = 2.0
+
+
+def monitoring_payload() -> dict[str, Any]:
+    today = datetime.now(IST).date()
+    rows = get_db().list_trades_between(V2_FREEZE_DATE, str(today), limit=5000)
+    closed: list[dict[str, Any]] = []
+    open_count = 0
+    for row in rows:
+        if str(row.get("status") or "") != "CLOSED":
+            open_count += 1
+            continue
+        r_value = row.get("r_multiple")
+        if r_value is None:
+            continue
+        risk = float(row.get("risk_points") or 0)
+        cost_r = (MONITORING_COST_POINTS_PER_TRADE / risk) if risk > 0 else 0.0
+        closed.append(
+            {
+                "date": str(row.get("date")),
+                "entry_time": str(row.get("entry_time") or ""),
+                "exit_time": str(row.get("exit_time") or ""),
+                "direction": str(row.get("direction") or ""),
+                "setup_type": str(row.get("setup_type") or ""),
+                "exit_reason": str(row.get("exit_reason") or ""),
+                "result": str(row.get("result") or ""),
+                "r": round(float(r_value), 3),
+                "r_after_cost": round(float(r_value) - cost_r, 3),
+            }
+        )
+    closed.sort(key=lambda item: (item["date"], item["entry_time"]))
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for trade in closed:
+        cum += trade["r"]
+        trade["cum_r"] = round(cum, 3)
+        peak = max(peak, cum)
+        max_dd = min(max_dd, cum - peak)
+    n = len(closed)
+    total_r = round(sum(t["r"] for t in closed), 3)
+    total_r_cost = round(sum(t["r_after_cost"] for t in closed), 3)
+    mean_r = round(total_r / n, 4) if n else 0.0
+    mean_r_cost = round(total_r_cost / n, 4) if n else 0.0
+    wins = sum(1 for t in closed if t["r"] > 0)
+    days_elapsed = (today - pd.to_datetime(V2_FREEZE_DATE).date()).days
+    checks = [
+        {
+            "name": "Sample size",
+            "detail": f"{n} / {MONITORING_MIN_TRADES} closed forward trades",
+            "passed": n >= MONITORING_MIN_TRADES,
+        },
+        {
+            "name": "Observation period",
+            "detail": f"{days_elapsed} / {MONITORING_MIN_DAYS} days since engine freeze ({V2_FREEZE_DATE})",
+            "passed": days_elapsed >= MONITORING_MIN_DAYS,
+        },
+        {
+            "name": "Edge after costs",
+            "detail": f"mean R/trade after {MONITORING_COST_POINTS_PER_TRADE:g}-pt cost = {mean_r_cost:+.4f} (needs >= +{MONITORING_MIN_MEAN_R_AFTER_COST})",
+            "passed": n > 0 and mean_r_cost >= MONITORING_MIN_MEAN_R_AFTER_COST,
+        },
+        {
+            "name": "Drawdown control",
+            "detail": f"max drawdown {max_dd:+.2f}R (limit {MONITORING_MAX_DRAWDOWN_R:g}R)",
+            "passed": max_dd > MONITORING_MAX_DRAWDOWN_R,
+        },
+    ]
+    ready = all(check["passed"] for check in checks)
+    return {
+        "freeze_date": V2_FREEZE_DATE,
+        "days_elapsed": days_elapsed,
+        "open_trades": open_count,
+        "closed_trades": n,
+        "wins": wins,
+        "losses": sum(1 for t in closed if t["r"] < 0),
+        "win_rate": round(wins / n * 100, 1) if n else 0.0,
+        "total_r": total_r,
+        "mean_r": mean_r,
+        "total_r_after_cost": total_r_cost,
+        "mean_r_after_cost": mean_r_cost,
+        "max_drawdown_r": round(max_dd, 3),
+        "checks": checks,
+        "ready": ready,
+        "verdict": "READY FOR REAL TRADING" if ready else "NOT READY — KEEP PAPER TRADING",
+        "trades": list(reversed(closed))[:200],
+    }
+
+
+@app.get("/api/admin/monitoring", dependencies=[Depends(require_admin)])
+def api_admin_monitoring() -> dict[str, Any]:
+    return runtime_cache_get("admin-monitoring", 15, monitoring_payload, copy_value=True)
+
+
 def render_admin(
     request: Request,
     user: dict[str, Any],
@@ -2467,6 +2571,7 @@ def render_admin(
             "stats": trade_stats(trades),
             "candle_counts": candle_counts,
             "preflight": preflight,
+            "monitoring": runtime_cache_get("admin-monitoring", 15, monitoring_payload, copy_value=True),
             "error": error,
         },
     )

@@ -56,6 +56,7 @@
         <button type="button" class="side-nav-btn" data-view-target="zone-detection">Zone Detection</button>
         <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
         <button type="button" class="side-nav-btn" data-view-target="lot-settings">Lot Settings</button>
+        <button type="button" class="side-nav-btn" data-view-target="monitoring">Monitoring</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
       </nav>
@@ -457,6 +458,76 @@
             </table>
           </div>
         </article>
+      </section>
+
+      <section class="portal-view" data-view="monitoring" hidden>
+        <header class="board-header card">
+          <div>
+            <p class="label">Forward Validation</p>
+            <h1>Go-Live Monitoring</h1>
+            <p class="subtitle">Frozen V2 engine paper-trade performance since {{ monitoring.freeze_date }}. The verdict below uses pre-registered criteria — thresholds are fixed and must not be adjusted after seeing results.</p>
+          </div>
+        </header>
+
+        <section class="card preflight-card">
+          <div class="line-head">
+            <div>
+              <p class="label">Real Trading Verdict</p>
+              <h2>{{ monitoring.verdict }}</h2>
+            </div>
+            <span class="preflight-badge preflight-{{ 'ok' if monitoring.ready else 'warn' }}">{{ 'GO' if monitoring.ready else 'WAIT' }}</span>
+          </div>
+          <div class="preflight-grid">
+            {% for check in monitoring.checks %}
+            <article class="preflight-item preflight-{{ 'ok' if check.passed else 'warn' }}">
+              <div class="preflight-item-head">
+                <span class="preflight-dot"></span>
+                <strong>{{ check.name }}</strong>
+              </div>
+              <p>{{ check.detail }}</p>
+              <span class="preflight-action">{{ 'PASS' if check.passed else 'PENDING' }}</span>
+            </article>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="grid top-grid">
+          <article class="card stat-card"><p class="label">Closed Trades</p><h2>{{ monitoring.closed_trades }}</h2></article>
+          <article class="card stat-card"><p class="label">Mean R / Trade</p><h2>{{ '%+.3f'|format(monitoring.mean_r) }}</h2></article>
+          <article class="card stat-card"><p class="label">Mean R After Cost</p><h2>{{ '%+.3f'|format(monitoring.mean_r_after_cost) }}</h2></article>
+          <article class="card stat-card"><p class="label">Total R</p><h2>{{ '%+.2f'|format(monitoring.total_r) }}</h2></article>
+        </section>
+        <section class="grid top-grid">
+          <article class="card stat-card"><p class="label">Win Rate</p><h2>{{ monitoring.win_rate }}%</h2></article>
+          <article class="card stat-card"><p class="label">Max Drawdown</p><h2>{{ '%+.2f'|format(monitoring.max_drawdown_r) }}R</h2></article>
+          <article class="card stat-card"><p class="label">Days Since Freeze</p><h2>{{ monitoring.days_elapsed }}</h2></article>
+          <article class="card stat-card"><p class="label">Open Trades</p><h2>{{ monitoring.open_trades }}</h2></article>
+        </section>
+
+        <section class="grid paper-grid">
+          <article class="card">
+            <div class="line-head"><p class="label">Forward Trades — Per-Trade R (latest first)</p></div>
+            <div class="paper-table-wrap">
+              <table class="paper-table">
+                <thead><tr><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Exit Reason</th><th>R</th><th>R After Cost</th><th>Cumulative R</th></tr></thead>
+                <tbody>
+                  {% for trade in monitoring.trades %}
+                  <tr>
+                    <td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
+                    <td class="truncate-cell" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td>
+                    <td>{{ trade.exit_reason or "--" }}</td>
+                    <td>{{ '%+.3f'|format(trade.r) }}</td>
+                    <td>{{ '%+.3f'|format(trade.r_after_cost) }}</td>
+                    <td>{{ '%+.3f'|format(trade.cum_r) }}</td>
+                  </tr>
+                  {% else %}
+                  <tr><td colspan="9" class="small">No closed forward trades yet. Paper trading collects evidence from {{ monitoring.freeze_date }} onwards.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
       </section>
 
       <section class="portal-view" data-view="paper" hidden>
