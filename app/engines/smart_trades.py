@@ -775,6 +775,19 @@ class SmartTradeEngine:
             return ("SMART_ZONE_TREND_CONTINUATION", "PE", "trend_continuation")
         return None
 
+    @staticmethod
+    def _day_efficiency(day_rows: pd.DataFrame, index: int) -> float:
+        """Kaufman efficiency ratio of today's closes up to and including the
+        confirmation candle: |net move| / sum(|candle-to-candle moves|).
+        ~1.0 on a one-way trend day, ~0.0 in chop. Needs at least 3 closes."""
+        closes = day_rows.iloc[: max(int(index), 0) + 1]["close"].to_numpy(dtype=float)
+        if len(closes) < 3:
+            return 0.0
+        path = float(abs(pd.Series(closes).diff().dropna()).sum())
+        if path <= 0:
+            return 0.0
+        return float(abs(closes[-1] - closes[0]) / path)
+
     def _day_trend(self, day_rows: pd.DataFrame, index: int) -> str:
         if index < 1 or day_rows.empty:
             return "range"
@@ -907,6 +920,20 @@ class SmartTradeEngine:
                 "entry_model": entry_model,
                 "time": row["time"],
             }
+
+        # Breakout-family setups need a trending day: Kaufman efficiency ratio of
+        # today's closes up to the confirmation candle must clear the configured
+        # floor. Applied identically to both directions.
+        if setup in {"SMART_ZONE_BREAK_CONFIRMATION", "SMART_ZONE_TREND_CONTINUATION"}:
+            day_efficiency = self._day_efficiency(day_rows, row_index)
+            min_efficiency = float(getattr(self.cfg, "smart_trade_breakout_min_day_efficiency", 0.0) or 0.0)
+            if min_efficiency > 0 and day_efficiency < min_efficiency:
+                return None, "Breakout setup blocked: day is not trending (low efficiency)", {
+                    "zone": zone.to_dict(),
+                    "entry_model": entry_model,
+                    "day_efficiency": round(day_efficiency, 3),
+                    "min_required": min_efficiency,
+                }
 
         # Quality is one uniform confluence threshold for all setups. Weak setups
         # (e.g. a reaction with no structure, or a counter-PD entry) simply score

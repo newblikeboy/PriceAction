@@ -167,6 +167,11 @@ class StrategyConfig:
     smart_trade_sweep_reclaim_min_body_pct: float = 0.55
     smart_trade_sweep_reclaim_min_range_atr: float = 1.0
     smart_trade_reaction_requires_hold: bool = False
+    # Breakout-family setups (zone break, trend continuation) only trade when the
+    # day so far is actually trending: Kaufman efficiency ratio of today's closes
+    # must reach this value. 0 disables the gate. Validated on 2024H2+2025 dev
+    # windows; stable across the 0.25-0.45 threshold range.
+    smart_trade_breakout_min_day_efficiency: float = 0.35
     # Trend continuation: buy/sell the pullback into a with-trend zone while the trend is intact.
     smart_trade_continuation_enabled: bool = True
     smart_trade_continuation_pullback_lookback: int = 4
@@ -175,7 +180,7 @@ class StrategyConfig:
     smart_trade_block_break_end: str = "13:00"
     smart_trade_late_strength_start: str = "12:00"
     smart_trade_block_continuation_after: str = "13:30"
-    paper_breakeven_after_r: float = 1.0
+    paper_breakeven_after_r: float = 0.7
     paper_profit_lock_after_r: float = 1.0
     paper_profit_lock_r: float = 0.5
     paper_near_target_exit_pct: float = 0.95
