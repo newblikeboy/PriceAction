@@ -95,6 +95,19 @@ _fyers_token_scheduler_status: dict[str, Any] = {
     "next_run_at": None,
     "last_error": None,
 }
+ANGEL_TOKEN_REFRESH_HOUR = int(os.getenv("ANGEL_TOKEN_REFRESH_HOUR", "8"))
+ANGEL_TOKEN_REFRESH_MINUTE = int(os.getenv("ANGEL_TOKEN_REFRESH_MINUTE", "30"))
+_angel_token_scheduler_lock = threading.Lock()
+_angel_token_scheduler_started = False
+_angel_token_scheduler_stop = threading.Event()
+_angel_token_scheduler_status: dict[str, Any] = {
+    "running": False,
+    "last_run_at": None,
+    "last_success_at": None,
+    "next_run_at": None,
+    "last_error": None,
+    "last_result": None,
+}
 _market_data_scheduler_lock = threading.Lock()
 _market_data_scheduler_started = False
 _market_data_scheduler_stop = threading.Event()
@@ -326,6 +339,120 @@ def ensure_fyers_token_scheduler() -> None:
         _fyers_token_scheduler_started = True
 
 
+def next_angel_token_refresh_time(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(IST)
+    run_at = current.replace(
+        hour=ANGEL_TOKEN_REFRESH_HOUR,
+        minute=ANGEL_TOKEN_REFRESH_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if run_at <= current:
+        run_at += timedelta(days=1)
+    return run_at
+
+
+def refresh_angel_tokens_job(source: str = "scheduler") -> bool:
+    with _angel_token_scheduler_lock:
+        _angel_token_scheduler_status["last_run_at"] = datetime.now(IST).isoformat(timespec="seconds")
+        _angel_token_scheduler_status["last_error"] = None
+    try:
+        sessions = get_db().list_angel_autologin_sessions()
+    except Exception as exc:
+        with _angel_token_scheduler_lock:
+            _angel_token_scheduler_status["last_error"] = str(exc)
+        logger.exception("Angel token refresh could not list users from %s", source)
+        return False
+    if not sessions:
+        with _angel_token_scheduler_lock:
+            _angel_token_scheduler_status["last_result"] = "no eligible users"
+            _angel_token_scheduler_status["last_success_at"] = datetime.now(IST).isoformat(timespec="seconds")
+        return True
+    refreshed = 0
+    failures: list[str] = []
+    for session in sessions:
+        username = str(session["username"])
+        try:
+            get_angel_execution().login_user(username)
+            runtime_cache_clear(f"user:{username}")
+            refreshed += 1
+        except Exception as exc:
+            failures.append(f"{username}: {exc}")
+    with _angel_token_scheduler_lock:
+        _angel_token_scheduler_status["last_result"] = f"refreshed {refreshed}/{len(sessions)} user(s)"
+        if failures:
+            _angel_token_scheduler_status["last_error"] = "; ".join(failures)
+        else:
+            _angel_token_scheduler_status["last_success_at"] = datetime.now(IST).isoformat(timespec="seconds")
+    if failures:
+        logger.error("Angel token refresh from %s had failures: %s", source, "; ".join(failures))
+    else:
+        logger.info("Angel token refresh completed from %s for %s user(s)", source, refreshed)
+    return not failures
+
+
+# Mirror the FYERS policy: a failed daily refresh must not leave live execution
+# tokenless for the day — retry every 15 minutes (up to 8 attempts), and refresh
+# on startup when any eligible user's token is missing or about to expire.
+ANGEL_TOKEN_RETRY_INTERVAL_SECONDS = 15 * 60
+ANGEL_TOKEN_RETRY_LIMIT = 8
+ANGEL_TOKEN_STARTUP_MIN_HOURS = 2.0
+
+
+def _angel_token_needs_startup_refresh() -> bool:
+    try:
+        sessions = get_db().list_angel_autologin_sessions()
+    except Exception:
+        return False
+    if not sessions:
+        return False
+    now_ts = datetime.now(IST).timestamp()
+    for session in sessions:
+        expires_at = session.get("token_expires_at")
+        if not expires_at:
+            return True
+        if (float(expires_at) - now_ts) / 3600.0 < ANGEL_TOKEN_STARTUP_MIN_HOURS:
+            return True
+    return False
+
+
+def _refresh_angel_tokens_with_retries(source: str) -> None:
+    if refresh_angel_tokens_job(source=source):
+        return
+    for attempt in range(1, ANGEL_TOKEN_RETRY_LIMIT + 1):
+        if _angel_token_scheduler_stop.wait(ANGEL_TOKEN_RETRY_INTERVAL_SECONDS):
+            return
+        if refresh_angel_tokens_job(source=f"{source}-retry-{attempt}"):
+            return
+
+
+def angel_token_scheduler_worker() -> None:
+    if _angel_token_needs_startup_refresh():
+        _refresh_angel_tokens_with_retries("startup-catchup")
+    while not _angel_token_scheduler_stop.is_set():
+        next_run = next_angel_token_refresh_time()
+        with _angel_token_scheduler_lock:
+            _angel_token_scheduler_status["running"] = True
+            _angel_token_scheduler_status["next_run_at"] = next_run.isoformat(timespec="seconds")
+        wait_seconds = max(0.0, (next_run - datetime.now(IST)).total_seconds())
+        if _angel_token_scheduler_stop.wait(wait_seconds):
+            break
+        _refresh_angel_tokens_with_retries("scheduler")
+    with _angel_token_scheduler_lock:
+        _angel_token_scheduler_status["running"] = False
+
+
+def ensure_angel_token_scheduler() -> None:
+    global _angel_token_scheduler_started
+    with _angel_token_scheduler_lock:
+        if _angel_token_scheduler_started:
+            return
+        _angel_token_scheduler_stop.clear()
+        thread = threading.Thread(target=angel_token_scheduler_worker, daemon=True, name="angel-token-scheduler")
+        thread.start()
+        _angel_token_scheduler_started = True
+
+
 def next_nse_market_open_time(now: datetime | None = None) -> datetime:
     current = now or datetime.now(IST)
     start = current.replace(hour=9, minute=15, second=0, microsecond=0)
@@ -439,6 +566,7 @@ def ensure_market_data_scheduler() -> None:
 @app.on_event("startup")
 def start_background_workers() -> None:
     ensure_fyers_token_scheduler()
+    ensure_angel_token_scheduler()
     ensure_market_data_scheduler()
     get_angel_execution().warm_future_contracts()
 
@@ -446,6 +574,7 @@ def start_background_workers() -> None:
 @app.on_event("shutdown")
 def stop_background_workers() -> None:
     _fyers_token_scheduler_stop.set()
+    _angel_token_scheduler_stop.set()
     _market_data_scheduler_stop.set()
     stop_live_market_data_socket(source="shutdown")
 
@@ -2302,6 +2431,22 @@ def api_user_broker_login(user: dict[str, Any] = Depends(require_user)) -> dict[
         return {"ok": True, "login": result, "broker": get_angel_execution().status(str(user["username"]))}
     except AngelExecutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/angel/token-scheduler")
+def api_admin_angel_token_scheduler(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    with _angel_token_scheduler_lock:
+        status = dict(_angel_token_scheduler_status)
+    status["refresh_time_ist"] = f"{ANGEL_TOKEN_REFRESH_HOUR:02d}:{ANGEL_TOKEN_REFRESH_MINUTE:02d}"
+    return {"ok": True, "scheduler": status}
+
+
+@app.post("/api/admin/angel/token-scheduler/run")
+def api_admin_angel_token_refresh_now(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    ok = refresh_angel_tokens_job(source=f"manual:{user['username']}")
+    with _angel_token_scheduler_lock:
+        status = dict(_angel_token_scheduler_status)
+    return {"ok": ok, "scheduler": status}
 
 
 @app.post("/api/admin/angel/future-test-order")

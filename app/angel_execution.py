@@ -276,6 +276,8 @@ class AngelExecutionManager:
         session = self.db.get_user_angel_session(username)
         if not session:
             raise AngelExecutionError("User was not found")
+        if not session.get("trading_enabled"):
+            raise AngelExecutionError("Trading Engine is off for this user. Enable it before placing a live order.")
         if not str(session.get("api_key") or "").strip():
             raise AngelExecutionError("No Angel One API key saved for this user")
         if not str(session.get("access_token") or "").strip():

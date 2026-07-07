@@ -504,6 +504,27 @@ class Database:
                     (username,),
                 )
 
+    def list_angel_autologin_sessions(self, limit: int = 5000) -> list[dict[str, Any]]:
+        """Users eligible for the daily automatic Angel One token refresh: they have
+        connected before and still have full terminal credentials saved."""
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT username, angel_one_token_expires_at AS token_expires_at
+                    FROM users
+                    WHERE angel_one_connected = 1
+                      AND COALESCE(angel_one_client_id, '') <> ''
+                      AND COALESCE(angel_one_api_key, '') <> ''
+                      AND COALESCE(angel_one_pin, '') <> ''
+                      AND COALESCE(angel_one_totp_secret, '') <> ''
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                return list(cursor.fetchall())
+
     def list_connected_angel_sessions(self, limit: int = 5000) -> list[dict[str, Any]]:
         with self.connect() as db:
             with db.cursor() as cursor:
