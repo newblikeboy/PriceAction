@@ -31,7 +31,7 @@ from app.domain import SkippedSignal
 from app.engines.levels import LevelEngine
 from app.engines.signals import SignalEngine
 from app.fyers_integration import FyersQuotePoller, FyersSocketSession, nse_market_hours_status
-from app.options_pricing import select_option_contract, to_float, to_int
+from app.options_pricing import to_float, to_int
 from app.paper_trading import PaperTradeEngine, failed_zone_ids_from_trades, filter_failed_zone_signals
 from app.replay import ReplayBarSession
 from app.zone_detection import ZoneDetectionSession
@@ -472,20 +472,6 @@ def cached_fyers_quote(symbol: str) -> float:
     return float(runtime_cache_get(f"fyers-quote:{symbol}", 3, lambda: get_loader().fetch_fyers_quote(symbol), copy_value=False))
 
 
-def cached_fyers_quote_details(symbol: str) -> dict[str, Any] | None:
-    return runtime_cache_get(f"fyers-quote-details:{symbol}", 2, lambda: get_loader().fetch_fyers_quote_details(symbol), copy_value=True)
-
-
-def cached_option_snapshot() -> dict[str, Any] | None:
-    strikecount = max(11, int(config.option_selection_strikecount))
-    return runtime_cache_get(
-        f"fyers-option-snapshot:NIFTY:{strikecount}",
-        10,
-        lambda: get_loader().fetch_fyers_option_snapshot(FYERS_NIFTY_INDEX, strikecount),
-        copy_value=True,
-    )
-
-
 def live_socket_quote(symbol: str) -> dict[str, Any]:
     market_hours = nse_market_hours_status()
     if not market_hours["is_open"]:
@@ -582,12 +568,6 @@ def trade_stats(trades: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def trade_points(trade: dict[str, Any]) -> float | None:
-    option_points = trade.get("option_points")
-    if option_points is not None:
-        try:
-            return round(float(option_points), 2)
-        except (TypeError, ValueError):
-            pass
     features = json_payload(trade.get("features_json"))
     feature_points = features.get("points") if isinstance(features, dict) else None
     if feature_points is not None:
@@ -596,14 +576,6 @@ def trade_points(trade: dict[str, Any]) -> float | None:
         except (TypeError, ValueError):
             pass
     if str(trade.get("status") or "").upper() == "OPEN":
-        try:
-            option_entry = float(trade.get("option_entry_ltp") or 0)
-            option_mark = float(trade.get("option_mark_ltp") or 0)
-        except (TypeError, ValueError):
-            option_entry = 0.0
-            option_mark = 0.0
-        if option_entry > 0.0 and option_mark > 0.0:
-            return round(option_mark - option_entry, 2)
         underlying_points = trade.get("underlying_points")
         if underlying_points is not None:
             try:
@@ -667,20 +639,11 @@ def json_list_payload(value: Any) -> list[Any]:
 def active_trade_text(trades: list[dict[str, Any]]) -> str:
     for trade in trades:
         if str(trade.get("status") or "").upper() == "OPEN":
-            option_symbol = str(trade.get("option_symbol") or "").strip()
-            option_entry = trade.get("option_entry_ltp")
-            option_mark = trade.get("option_mark_ltp")
             points = trade.get("points")
-            mark_text = f", mark {option_mark}" if option_mark else ""
             pnl_text = f", P&L {points} pts" if points is not None else ""
-            if option_symbol and option_entry:
-                return (
-                    f"{trade.get('direction')} {trade.get('setup_type')} "
-                    f"from {trade.get('entry_time')} @ {option_entry} ({option_symbol}{mark_text}{pnl_text})"
-                )
             return (
                 f"{trade.get('direction')} {trade.get('setup_type')} "
-                f"from {trade.get('entry_time')} @ {trade.get('entry_index_price')}"
+                f"from {trade.get('entry_time')} @ {trade.get('entry_index_price')}{pnl_text}"
             )
     return "No active paper trade."
 
@@ -1194,7 +1157,7 @@ def start_live_trade_pnl_monitor(
     def on_quote(price: float) -> None:
         tick_dt = datetime.now(IST).replace(tzinfo=None)
         record_live_market_price(float(price), tick_dt, source="FYERS REST quote monitor")
-        update_live_open_trades(float(price), tick_dt, force_quote_refresh=True, allow_time_exit=False)
+        update_live_open_trades(float(price), tick_dt, allow_time_exit=False)
         with _live_trade_monitor_lock:
             _live_trade_monitor_status.update(
                 {
@@ -1367,45 +1330,16 @@ def evaluate_closed_live_5m_candle(candle: dict[str, Any]) -> None:
 
 
 def attach_live_option_pricing(trade: dict[str, Any], signal: Any) -> None:
+    # Futures-only: paper trade PnL always tracks the underlying index, so no
+    # option chain snapshot or premium quote is fetched at entry.
     trade["underlying_entry_price"] = trade.get("entry_index_price")
-    trade["pnl_source"] = "option_unavailable"
-    features = trade.get("features") if isinstance(trade.get("features"), dict) else {}
-    try:
-        snapshot = cached_option_snapshot()
-        selected = select_option_contract(
-            direction=str(getattr(signal, "direction", trade.get("direction", ""))),
-            spot_price=float(getattr(signal, "entry_index_price", trade.get("entry_index_price") or 0)),
-            setup_score=int(getattr(signal, "setup_score", trade.get("setup_score") or 0)),
-            features=getattr(signal, "features", features) if isinstance(getattr(signal, "features", features), dict) else features,
-            option_snapshot=snapshot,
-        )
-        features["selected_option_contract"] = selected
-        symbol = str(selected.get("quote_symbol") or selected.get("symbol") or "").strip()
-        trade["option_symbol"] = symbol or None
-        trade["option_side"] = selected.get("side") or trade.get("direction")
-        trade["option_strike"] = selected.get("strike")
-        quote = cached_fyers_quote_details(symbol) if symbol else None
-        entry_ltp = to_float((quote or {}).get("ltp"), to_float(selected.get("ltp_ref"), 0.0))
-        if entry_ltp > 0.0:
-            trade["option_entry_ltp"] = round(entry_ltp, 2)
-            trade["option_mark_ltp"] = round(entry_ltp, 2)
-            trade["pnl_source"] = "option_quote"
-            features["option_entry_ltp"] = round(entry_ltp, 2)
-            features["option_quote_ts"] = to_int((quote or {}).get("timestamp"), to_int(selected.get("snapshot_ts"), 0))
-            features["option_selection_status"] = "resolved_with_entry_quote"
-        else:
-            features["option_pricing_status"] = "entry_ltp_unavailable"
-            features["option_selection_status"] = selected.get("status") or "symbol_unavailable"
-    except Exception as exc:
-        features["option_pricing_status"] = f"error:{exc}"
-    trade["features"] = features
+    trade["pnl_source"] = "underlying"
 
 
 def update_live_open_trades(
     underlying_price: float,
     tick_time: datetime,
     *,
-    force_quote_refresh: bool = False,
     allow_time_exit: bool = True,
 ) -> None:
     try:
@@ -1421,24 +1355,17 @@ def update_live_open_trades(
         trade_id = int(trade.get("id") or 0)
         if trade_id <= 0:
             continue
-        option_symbol = str(trade.get("option_symbol") or "").strip()
-        try:
-            quote = get_loader().fetch_fyers_quote_details(option_symbol) if force_quote_refresh and option_symbol else cached_fyers_quote_details(option_symbol) if option_symbol else None
-        except Exception:
-            quote = None
-        mark_ltp = to_float((quote or {}).get("ltp"), to_float(trade.get("option_mark_ltp"), 0.0))
         direction = str(trade.get("direction") or "").upper()
         underlying_entry = to_float(trade.get("underlying_entry_price"), to_float(trade.get("entry_index_price"), 0.0))
         if direction == "CE":
             live_underlying_points = underlying_price - underlying_entry
         else:
             live_underlying_points = underlying_entry - underlying_price
-        if mark_ltp > 0.0 or underlying_entry > 0.0:
+        if underlying_entry > 0.0:
             try:
                 db.update_trade_option_mark(
                     trade_id,
-                    option_symbol=str((quote or {}).get("resolved_symbol") or (quote or {}).get("symbol") or option_symbol),
-                    option_mark_ltp=mark_ltp if mark_ltp > 0.0 and option_symbol else None,
+                    option_symbol="",
                     underlying_mark_price=underlying_price,
                     underlying_points=live_underlying_points,
                 )
@@ -1503,21 +1430,12 @@ def update_live_open_trades(
         if close_price is None:
             continue
 
-        option_entry = to_float(trade.get("option_entry_ltp"), 0.0)
-        option_exit = mark_ltp if mark_ltp > 0.0 else to_float(trade.get("option_mark_ltp"), 0.0)
-        if option_symbol and option_entry <= 0.0 and option_exit > 0.0:
-            option_entry = option_exit
         if direction == "CE":
             underlying_points = close_price - underlying_entry
         else:
             underlying_points = underlying_entry - close_price
-        if option_entry > 0.0 and option_exit > 0.0:
-            points = option_exit - option_entry
-            pnl_source = "option_quote"
-        else:
-            points = underlying_points
-            option_exit = None
-            pnl_source = "underlying_fallback" if not option_symbol else "option_quote_unavailable"
+        points = underlying_points
+        pnl_source = "underlying"
         r_multiple = round(points / to_float(trade.get("risk_points"), 1.0), 3) if to_float(trade.get("risk_points"), 0.0) else 0
         result = "WIN" if points > 0 else "LOSS" if points < 0 else "FLAT"
         # Reuse the features dict already carrying the trailed-stop state from above.
@@ -1525,7 +1443,6 @@ def update_live_open_trades(
             {
                 "result": result,
                 "points": round(points, 2),
-                "option_points": round(points, 2) if pnl_source == "option_quote" else None,
                 "underlying_points": round(underlying_points, 2),
                 "pnl_source": pnl_source,
                 "reason_for_exit": reason,
@@ -1542,10 +1459,6 @@ def update_live_open_trades(
                     "r_multiple": r_multiple,
                     "max_favorable_excursion": round(mfe, 2),
                     "max_adverse_excursion": round(mae, 2),
-                    "option_symbol": str((quote or {}).get("resolved_symbol") or (quote or {}).get("symbol") or option_symbol),
-                    "option_mark_ltp": round(option_exit, 2) if option_exit else None,
-                    "option_exit_ltp": round(option_exit, 2) if option_exit else None,
-                    "option_points": round(points, 2) if pnl_source == "option_quote" else None,
                     "pnl_source": pnl_source,
                     "underlying_entry_price": round(underlying_entry, 2),
                     "underlying_exit_price": round(float(close_price), 2),
@@ -2290,7 +2203,6 @@ def logout() -> RedirectResponse:
 def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) -> HTMLResponse:
     trades = cached_trades(50)
     skipped = cached_skipped(50)
-    backtest_status = current_backtest_payload(user)
     report = backtest_report_payload(
         start_date=request.query_params.get("from_date"),
         end_date=request.query_params.get("to_date"),
@@ -2306,7 +2218,6 @@ def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) ->
             "skipped": skipped,
             "stats": trade_stats(trades),
             "active_trade_text": active_trade_text(trades),
-            "latest_backtest": backtest_status["latest"],
             "report": report,
         },
     )
@@ -2318,7 +2229,7 @@ async def backtest(
     symbol: str = Form("NIFTY"),
     start_date: str | None = Form(None),
     end_date: str | None = Form(None),
-    user: dict[str, Any] = Depends(require_user),
+    user: dict[str, Any] = Depends(require_admin),
 ):
     clean_symbol = symbol.strip() or "NIFTY"
     clean_start = start_date.strip() if start_date else None
@@ -2327,7 +2238,7 @@ async def backtest(
         if _backtest_job.get("status") == "running":
             if wants_json(request):
                 raise HTTPException(status_code=409, detail="A backtest is already running")
-            return RedirectResponse("/dashboard", status_code=303)
+            return RedirectResponse("/admin", status_code=303)
     run_id = get_db().create_backtest_run(clean_symbol, clean_start, clean_end, username=str(user["username"]))
     job = {
         "id": run_id,
@@ -2354,7 +2265,7 @@ async def backtest(
     thread.start()
     if wants_json(request):
         return {"ok": True, "backtest": job}
-    return RedirectResponse("/dashboard", status_code=303)
+    return RedirectResponse("/admin", status_code=303)
 
 
 @app.get("/api/backtest/latest")
@@ -2389,6 +2300,14 @@ def api_user_broker_login(user: dict[str, Any] = Depends(require_user)) -> dict[
         result = get_angel_execution().login_user(str(user["username"]))
         runtime_cache_clear(f"user:{user['username']}")
         return {"ok": True, "login": result, "broker": get_angel_execution().status(str(user["username"]))}
+    except AngelExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/angel/future-test-order")
+def api_admin_future_test_order(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        return get_angel_execution().place_test_future_order(str(user["username"]))
     except AngelExecutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2588,6 +2507,12 @@ def render_admin(
     )
     candle_counts = cached_candle_counts("NIFTY")
     preflight = runtime_cache_get("admin-preflight", 15, admin_preflight, copy_value=True)
+    angel_hit_user = str(request.query_params.get("hit_user") or "").strip() or None
+    angel_hits = {
+        "rows": get_db().list_angel_api_hits(limit=100, username=angel_hit_user),
+        "users": get_db().list_angel_api_hit_users(),
+        "selected_user": angel_hit_user or "",
+    }
     return templates.TemplateResponse(
         "admin.html",
         {
@@ -2607,6 +2532,7 @@ def render_admin(
             "candle_counts": candle_counts,
             "preflight": preflight,
             "monitoring": runtime_cache_get("admin-monitoring", 15, monitoring_payload, copy_value=True),
+            "angel_hits": angel_hits,
             "error": error,
         },
     )

@@ -563,6 +563,45 @@ class Database:
                     ),
                 )
 
+    def list_angel_api_hits(self, limit: int = 100, username: str | None = None) -> list[dict[str, Any]]:
+        conditions = ""
+        params: list[Any] = []
+        if username:
+            conditions = "WHERE username = %s"
+            params.append(username)
+        params.append(max(1, int(limit)))
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT id, username, paper_trade_id, action, symbol, request_json,
+                           response_json, http_status, ok, error_message, created_at
+                    FROM angel_order_api_hits
+                    {conditions}
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = list(cursor.fetchall())
+        for row in rows:
+            for source, target in (("request_json", "request_payload"), ("response_json", "response_payload")):
+                value = row.pop(source, None)
+                if isinstance(value, str):
+                    try:
+                        row[target] = json.loads(value)
+                    except json.JSONDecodeError:
+                        row[target] = {"raw": value}
+                else:
+                    row[target] = value if isinstance(value, dict) else {}
+        return rows
+
+    def list_angel_api_hit_users(self) -> list[str]:
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT DISTINCT username FROM angel_order_api_hits ORDER BY username ASC")
+                return [str(row["username"]) for row in cursor.fetchall()]
+
     def save_angel_live_entry(
         self,
         *,

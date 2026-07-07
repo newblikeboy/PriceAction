@@ -823,6 +823,61 @@ body {
   overflow: auto;
 }
 
+.angel-hit-table {
+  min-width: 1250px;
+}
+
+.angel-hit-table-wrap {
+  max-height: 640px;
+  overflow: auto;
+}
+
+.angel-hit-table td {
+  vertical-align: top;
+}
+
+.hit-json-cell {
+  min-width: 320px;
+}
+
+.hit-json-cell details {
+  margin: 0.14rem 0;
+}
+
+.hit-json-cell summary {
+  cursor: pointer;
+  font: 700 0.78rem/1.3 "JetBrains Mono", monospace;
+  color: #35507e;
+}
+
+.hit-json {
+  margin: 0.3rem 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  max-width: 560px;
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #d7e4f7;
+  font: 500 0.74rem/1.5 "JetBrains Mono", monospace;
+  white-space: pre;
+  text-align: left;
+}
+
+.future-test-response {
+  max-width: none;
+  max-height: 480px;
+}
+
+.status-chip.hit-ok {
+  color: #0f7a4d;
+}
+
+.status-chip.hit-fail {
+  color: #b3384b;
+}
+
 #retrain-zone .paper-table th,
 #retrain-zone .paper-table td {
   white-space: normal;

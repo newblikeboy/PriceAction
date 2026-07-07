@@ -234,16 +234,9 @@ class PaperTradeEngine:
         else:
             underlying_points = trade.entry_index_price - trade.exit_index_price
         trade.underlying_points = round(underlying_points, 2)
-        option_entry = float(trade.option_entry_ltp or 0)
-        option_exit = float(trade.option_exit_ltp or trade.option_mark_ltp or 0)
-        if option_entry > 0 and option_exit > 0:
-            points = option_exit - option_entry
-            trade.option_exit_ltp = round(option_exit, 2)
-            trade.option_points = round(points, 2)
-            trade.pnl_source = "option_quote"
-        else:
-            points = underlying_points
-            trade.pnl_source = "underlying_backtest"
+        # Futures-only: paper trade PnL always tracks the underlying index move.
+        points = underlying_points
+        trade.pnl_source = "underlying_backtest"
         trade.features["points"] = round(points, 2)
         trade.r_multiple = round(points / trade.risk_points, 3) if trade.risk_points else 0
         trade.result = "WIN" if trade.r_multiple > 0 else "LOSS" if trade.r_multiple < 0 else "FLAT"
@@ -251,7 +244,6 @@ class PaperTradeEngine:
             {
                 "result": trade.result,
                 "points": round(points, 2),
-                "option_points": trade.option_points,
                 "pnl_source": trade.pnl_source,
                 "underlying_points": trade.underlying_points,
                 "R_multiple": trade.r_multiple,

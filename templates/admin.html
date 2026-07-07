@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Nifty Price Action Admin Console</title>
-  <link rel="stylesheet" href="/static/finalpt/styles.css?v=replay-fit-2">
+  <link rel="stylesheet" href="/static/finalpt/styles.css?v=angel-hits-1">
 </head>
 <body class="dashboard-body">
   <div class="ambient-glow ambient-a"></div>
@@ -57,6 +57,8 @@
         <button type="button" class="side-nav-btn" data-view-target="fyers">FYERS Auth</button>
         <button type="button" class="side-nav-btn" data-view-target="lot-settings">Lot Settings</button>
         <button type="button" class="side-nav-btn" data-view-target="monitoring">Monitoring</button>
+        <button type="button" class="side-nav-btn" data-view-target="angel-hits">Angel API Hits</button>
+        <button type="button" class="side-nav-btn" data-view-target="future-test">Create Future Trade</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
       </nav>
@@ -530,6 +532,96 @@
         </section>
       </section>
 
+      <section class="portal-view" data-view="angel-hits" hidden>
+        <header class="home-head card">
+          <div>
+            <p class="label">Angel One</p>
+            <h1>Angel API Hits</h1>
+            <p class="subtitle">Every Angel One API call made by the system, per user — login, scrip search, and order placement — with the exact request payload and exchange response.</p>
+          </div>
+        </header>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Filter</h2><span class="status-chip">{{ angel_hits.rows|length }} hit{{ "s" if angel_hits.rows|length != 1 else "" }}</span></div>
+          <form method="get" action="/admin" class="backtest-form">
+            <input type="hidden" name="view" value="angel-hits">
+            <label class="field"><span>User</span>
+              <select class="text-input" name="hit_user">
+                <option value="">All users</option>
+                {% for hit_user in angel_hits.users %}
+                <option value="{{ hit_user }}" {{ "selected" if hit_user == angel_hits.selected_user else "" }}>{{ hit_user }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button class="action-btn" type="submit">Apply</button>
+          </form>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>API Hit Log (latest first)</h2></div>
+          <div class="paper-table-wrap angel-hit-table-wrap">
+            <table class="paper-table angel-hit-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Time (UTC)</th><th>User</th><th>Action</th><th>Symbol</th><th>Trade</th><th>HTTP</th><th>Status</th><th>Error</th><th>Payload / Response</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for hit in angel_hits.rows %}
+                <tr>
+                  <td>{{ hit.id }}</td>
+                  <td class="mono">{{ hit.created_at }}</td>
+                  <td>{{ hit.username }}</td>
+                  <td>{{ hit.action }}</td>
+                  <td>{{ hit.symbol or "--" }}</td>
+                  <td>{{ "#" ~ hit.paper_trade_id if hit.paper_trade_id else "--" }}</td>
+                  <td>{{ hit.http_status if hit.http_status is not none else "--" }}</td>
+                  <td><span class="status-chip {{ 'hit-ok' if hit.ok else 'hit-fail' }}">{{ "OK" if hit.ok else "FAIL" }}</span></td>
+                  <td class="truncate-cell reason-cell" title="{{ hit.error_message or '' }}">{{ hit.error_message or "--" }}</td>
+                  <td class="hit-json-cell">
+                    <details>
+                      <summary>Request</summary>
+                      <pre class="hit-json">{{ hit.request_payload | tojson(indent=2) }}</pre>
+                    </details>
+                    <details>
+                      <summary>Response</summary>
+                      <pre class="hit-json">{{ hit.response_payload | tojson(indent=2) }}</pre>
+                    </details>
+                  </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="10" class="small">No Angel One API hits recorded yet{{ " for " ~ angel_hits.selected_user if angel_hits.selected_user else "" }}.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="portal-view" data-view="future-test" hidden>
+        <header class="home-head card">
+          <div>
+            <p class="label">Angel One</p>
+            <h1>Create Future Trade</h1>
+            <p class="subtitle">Places one real MARKET BUY order for the nearest NIFTY future on your own Angel One session and shows the exact exchange response. If the account, IP whitelist, and market hours are all valid, this executes with real money.</p>
+          </div>
+        </header>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Place Order</h2><span id="future-test-chip" class="status-chip">idle</span></div>
+          <p class="small">Uses the logged-in admin's saved Angel One session, FUTURE contract resolution, and your configured lots — the same path live signals use.</p>
+          <div class="action-row">
+            <button id="future-test-btn" class="action-btn" type="button">Place Future Trade</button>
+          </div>
+          <p id="future-test-status" class="small">No order sent yet.</p>
+        </article>
+
+        <article class="card view-card">
+          <div class="line-head"><h2>Angel One Response</h2></div>
+          <pre id="future-test-response" class="hit-json future-test-response">--</pre>
+        </article>
+      </section>
+
       <section class="portal-view" data-view="paper" hidden>
         <section class="grid paper-grid">
           <article class="card">
@@ -597,7 +689,7 @@
     </main>
   </div>
 
-  <script src="/static/finalpt/panel.js?v=pain-user-1"></script>
+  <script src="/static/finalpt/panel.js?v=future-test-1"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/finalpt/admin-chart.js?v=zone-ranges-4"></script>
   <script src="/static/finalpt/admin-replay.js?v=replay-speed-1"></script>

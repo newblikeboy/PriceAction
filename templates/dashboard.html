@@ -43,7 +43,6 @@
 
       <nav class="side-nav" aria-label="Sections">
         <button type="button" class="side-nav-btn is-active" data-view-target="home">Home</button>
-        <button type="button" class="side-nav-btn" data-view-target="backtest">Backtest</button>
         <button type="button" class="side-nav-btn" data-view-target="reports">Report</button>
         <button type="button" class="side-nav-btn" data-view-target="trades">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
@@ -112,74 +111,6 @@
             </div>
           </article>
         </section>
-      </section>
-
-      <section class="portal-view" data-view="backtest" hidden>
-        <article class="card view-card">
-          <div class="line-head"><h2>Database Backtest</h2><span id="backtest-status-chip" class="status-chip">{{ latest_backtest.status if latest_backtest else "idle" }}</span></div>
-          <p class="small">Runs the paper strategy from candles stored in MySQL. Run the FYERS backfill script before using this.</p>
-          <form id="backtest-form" method="post" action="/backtest" class="backtest-form">
-            <label class="field"><span>Symbol</span><input class="text-input" name="symbol" value="NIFTY" required></label>
-            <label class="field"><span>Start Date</span><input class="text-input" type="date" name="start_date"></label>
-            <label class="field"><span>End Date</span><input class="text-input" type="date" name="end_date"></label>
-            <button id="backtest-submit" class="action-btn" type="submit">Run DB Backtest</button>
-          </form>
-        </article>
-
-        <article class="card view-card backtest-progress-card">
-          <div class="line-head">
-            <h2>Run Progress</h2>
-            <strong id="backtest-progress-text" class="mono">{{ latest_backtest.progress_pct|round(2) if latest_backtest else 0 }}%</strong>
-          </div>
-          <div class="progress-track" aria-label="Backtest progress">
-            <div id="backtest-progress-fill" class="progress-fill" style="width: {{ latest_backtest.progress_pct if latest_backtest else 0 }}%"></div>
-          </div>
-          <p id="backtest-current-step" class="small">{{ latest_backtest.current_step if latest_backtest else "No backtest has been started yet." }}</p>
-        </article>
-
-        <p id="latest-backtest-error" class="small error-text">{{ latest_backtest.error_message if latest_backtest and latest_backtest.error_message else "" }}</p>
-
-        <article class="card view-card">
-          <div class="line-head"><h2>Latest Backtest Result</h2><span id="latest-backtest-id" class="status-chip">{{ "#" ~ latest_backtest.id if latest_backtest and latest_backtest.id else "#--" }}</span></div>
-          <div class="backtest-result-grid paper-summary-grid">
-            <div class="kpi-box"><span>Status</span><strong id="latest-backtest-status">{{ latest_backtest.status if latest_backtest else "idle" }}</strong></div>
-            <div class="kpi-box"><span>Total Trades</span><strong id="latest-total-trades">{{ latest_backtest.summary.total_trades if latest_backtest and latest_backtest.summary else 0 }}</strong></div>
-            <div class="kpi-box"><span>Wins</span><strong id="latest-wins">{{ latest_backtest.summary.wins if latest_backtest and latest_backtest.summary else 0 }}</strong></div>
-            <div class="kpi-box"><span>Losses</span><strong id="latest-losses">{{ latest_backtest.summary.losses if latest_backtest and latest_backtest.summary else 0 }}</strong></div>
-            <div class="kpi-box"><span>Win Rate</span><strong id="latest-win-rate">{{ latest_backtest.summary.win_rate if latest_backtest and latest_backtest.summary else 0 }}%</strong></div>
-            <div class="kpi-box"><span>Total Points</span><strong id="latest-total-r">{{ latest_backtest.summary.total_points if latest_backtest and latest_backtest.summary else 0 }}</strong></div>
-            <div class="kpi-box"><span>Avg Points</span><strong id="latest-average-r">{{ latest_backtest.summary.average_points if latest_backtest and latest_backtest.summary else 0 }}</strong></div>
-            <div class="kpi-box"><span>Skipped</span><strong id="latest-skipped">{{ latest_backtest.skipped_count if latest_backtest else 0 }}</strong></div>
-          </div>
-        </article>
-
-        <article class="card view-card">
-          <div class="line-head"><h2>Latest Trade Table</h2></div>
-          <div class="paper-table-wrap backtest-trade-table-wrap">
-            <table class="paper-table backtest-trade-table">
-              <thead>
-                <tr>
-                  <th>#</th><th>Date</th><th>Entry</th><th>Exit</th><th>Side</th><th>Setup</th><th>Entry Price</th><th>SL</th><th>Target</th><th>Exit Price</th><th>Exit Reason</th><th>Result</th><th>Points</th><th>R</th><th>Score</th><th>Why Trade</th>
-                </tr>
-              </thead>
-              <tbody id="latest-backtest-trades-body">
-                {% if latest_backtest and latest_backtest.trades %}
-                {% for trade in latest_backtest.trades %}
-                <tr>
-                  <td>{{ loop.index }}</td><td>{{ trade.date }}</td><td>{{ trade.entry_time }}</td><td>{{ trade.exit_time or "--" }}</td><td>{{ trade.direction }}</td>
-                  <td class="truncate-cell wide-truncate" title="{{ trade.setup_type }}">{{ trade.setup_type }}</td>
-                  <td>{{ trade.entry_index_price }}</td><td>{{ trade.sl_index_price }}</td><td>{{ trade.target_index_price }}</td><td>{{ trade.exit_index_price or "--" }}</td>
-                  <td>{{ trade.exit_reason or "--" }}</td><td>{{ trade.result or "--" }}</td><td>{{ trade.points if trade.points is not none else "" }}</td><td>{{ trade.r_multiple if trade.r_multiple is not none else "" }}</td><td>{{ trade.setup_score if trade.setup_score is not none else "" }}</td>
-                  <td class="truncate-cell reason-cell" title="{{ trade.reason }}">{{ trade.reason or "--" }}</td>
-                </tr>
-                {% endfor %}
-                {% else %}
-                <tr><td colspan="16" class="small">No trades for the latest backtest run yet.</td></tr>
-                {% endif %}
-              </tbody>
-            </table>
-          </div>
-        </article>
       </section>
 
       <section class="portal-view" data-view="reports" hidden>

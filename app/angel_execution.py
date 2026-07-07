@@ -267,6 +267,55 @@ class AngelExecutionManager:
             )
         return {"ok": any(item["ok"] for item in results), "results": results}
 
+    def place_test_future_order(self, username: str, side: str = "BUY") -> dict[str, Any]:
+        if not self.execution_enabled:
+            raise AngelExecutionError("ANGEL_LIVE_EXECUTION_ENABLED is not true on the server")
+        clean_side = str(side or "BUY").strip().upper()
+        if clean_side not in {"BUY", "SELL"}:
+            raise AngelExecutionError(f"Unsupported order side: {clean_side}")
+        session = self.db.get_user_angel_session(username)
+        if not session:
+            raise AngelExecutionError("User was not found")
+        if not str(session.get("api_key") or "").strip():
+            raise AngelExecutionError("No Angel One API key saved for this user")
+        if not str(session.get("access_token") or "").strip():
+            raise AngelExecutionError("No Angel One access token. Run Terminal Login first.")
+        instrument = self._resolve_future_instrument()
+        quantity = self._order_quantity(session, int(instrument["lot_size"]))
+        payload = self._order_payload(
+            side=clean_side,
+            symbol=str(instrument["symbol"]),
+            token=str(instrument["token"]),
+            exchange=str(instrument.get("exchange") or "NFO"),
+            quantity=quantity,
+        )
+        response_payload, status_code, ok = self._post(
+            self.ORDER_URL,
+            payload,
+            self._headers(api_key=str(session["api_key"]), access_token=str(session["access_token"])),
+        )
+        order_id = self._order_id(response_payload)
+        placed_ok = ok and bool(order_id)
+        self.db.save_angel_api_hit(
+            username=username,
+            action="future_test",
+            symbol=str(instrument["symbol"]),
+            request_payload=payload,
+            response_payload=self._safe_response(response_payload),
+            http_status=status_code,
+            ok=ok,
+            error_message=None if ok else self._message(response_payload),
+        )
+        return {
+            "ok": placed_ok,
+            "order_id": order_id,
+            "instrument": instrument,
+            "request": payload,
+            "response": self._safe_response(response_payload),
+            "http_status": status_code,
+            "message": self._message(response_payload),
+        }
+
     def dispatch_exit(self, paper_trade_id: int, close_reason: str) -> dict[str, Any]:
         if not self.execution_enabled:
             return {"ok": False, "skipped": True, "reason": "ANGEL_LIVE_EXECUTION_ENABLED is not true"}
