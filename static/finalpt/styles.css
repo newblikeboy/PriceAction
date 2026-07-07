@@ -865,11 +865,6 @@ body {
   text-align: left;
 }
 
-.future-test-response {
-  max-width: none;
-  max-height: 480px;
-}
-
 .status-chip.hit-ok {
   color: #0f7a4d;
 }

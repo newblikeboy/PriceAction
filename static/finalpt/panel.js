@@ -692,52 +692,6 @@
     });
   }
 
-  const futureTestBtn = document.getElementById("future-test-btn");
-  const futureTestChip = document.getElementById("future-test-chip");
-  const futureTestStatus = document.getElementById("future-test-status");
-  const futureTestResponse = document.getElementById("future-test-response");
-  if (futureTestBtn) {
-    futureTestBtn.addEventListener("click", function () {
-      futureTestBtn.disabled = true;
-      futureTestBtn.textContent = "Placing Order...";
-      setText(futureTestChip, "sending");
-      setText(futureTestStatus, "Order sent to Angel One. Waiting for the exchange response...");
-      fetch("/api/admin/angel/future-test-order", {
-        method: "POST",
-        headers: { Accept: "application/json" },
-      })
-        .then(function (response) {
-          return response.json().then(function (body) {
-            return { httpOk: response.ok, body: body };
-          });
-        })
-        .then(function (result) {
-          const body = result.body || {};
-          const placed = result.httpOk && body.ok === true;
-          setText(futureTestChip, placed ? "placed" : "rejected");
-          if (placed) {
-            setText(futureTestStatus, `Order placed. Order ID: ${body.order_id || "--"}`);
-          } else {
-            setText(futureTestStatus, body.detail || body.message || "Order was not placed. See the response below.");
-          }
-          if (futureTestResponse) {
-            futureTestResponse.textContent = JSON.stringify(body, null, 2);
-          }
-        })
-        .catch(function (error) {
-          setText(futureTestChip, "error");
-          setText(futureTestStatus, error.message || "Request failed");
-          if (futureTestResponse) {
-            futureTestResponse.textContent = String(error.message || error);
-          }
-        })
-        .finally(function () {
-          futureTestBtn.disabled = false;
-          futureTestBtn.textContent = "Place Future Trade";
-        });
-    });
-  }
-
   document.addEventListener("portal:viewchange", function (event) {
     if (event.detail && event.detail.view === "broker") {
       loadBrokerStatus(false);

@@ -58,7 +58,6 @@
         <button type="button" class="side-nav-btn" data-view-target="lot-settings">Lot Settings</button>
         <button type="button" class="side-nav-btn" data-view-target="monitoring">Monitoring</button>
         <button type="button" class="side-nav-btn" data-view-target="angel-hits">Angel API Hits</button>
-        <button type="button" class="side-nav-btn" data-view-target="future-test">Create Future Trade</button>
         <button type="button" class="side-nav-btn" data-view-target="paper">Paper Trades</button>
         <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
       </nav>
@@ -537,7 +536,7 @@
           <div>
             <p class="label">Angel One</p>
             <h1>Angel API Hits</h1>
-            <p class="subtitle">Every Angel One API call made by the system, per user — login, scrip search, and order placement — with the exact request payload and exchange response.</p>
+            <p class="subtitle">Order-flow Angel One API calls made by the system, per user — scrip search and order placement — with the exact request payload and exchange response. Login hits are excluded.</p>
           </div>
         </header>
 
@@ -595,30 +594,6 @@
               </tbody>
             </table>
           </div>
-        </article>
-      </section>
-
-      <section class="portal-view" data-view="future-test" hidden>
-        <header class="home-head card">
-          <div>
-            <p class="label">Angel One</p>
-            <h1>Create Future Trade</h1>
-            <p class="subtitle">Places one real MARKET BUY order for the nearest NIFTY future on your own Angel One session and shows the exact exchange response. If the account, IP whitelist, and market hours are all valid, this executes with real money.</p>
-          </div>
-        </header>
-
-        <article class="card view-card">
-          <div class="line-head"><h2>Place Order</h2><span id="future-test-chip" class="status-chip">idle</span></div>
-          <p class="small">Uses the logged-in admin's saved Angel One session, FUTURE contract resolution, and your configured lots — the same path live signals use.</p>
-          <div class="action-row">
-            <button id="future-test-btn" class="action-btn" type="button">Place Future Trade</button>
-          </div>
-          <p id="future-test-status" class="small">No order sent yet.</p>
-        </article>
-
-        <article class="card view-card">
-          <div class="line-head"><h2>Angel One Response</h2></div>
-          <pre id="future-test-response" class="hit-json future-test-response">--</pre>
         </article>
       </section>
 
@@ -689,7 +664,7 @@
     </main>
   </div>
 
-  <script src="/static/finalpt/panel.js?v=future-test-1"></script>
+  <script src="/static/finalpt/panel.js?v=no-future-test-1"></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/finalpt/admin-chart.js?v=zone-ranges-4"></script>
   <script src="/static/finalpt/admin-replay.js?v=replay-speed-1"></script>

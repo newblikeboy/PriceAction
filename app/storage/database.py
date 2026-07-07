@@ -585,10 +585,12 @@ class Database:
                 )
 
     def list_angel_api_hits(self, limit: int = 100, username: str | None = None) -> list[dict[str, Any]]:
-        conditions = ""
+        # Login hits are audit noise here (daily auto-refresh logs one per user);
+        # this listing is for order-flow API hits only.
+        conditions = "WHERE action <> 'login'"
         params: list[Any] = []
         if username:
-            conditions = "WHERE username = %s"
+            conditions += " AND username = %s"
             params.append(username)
         params.append(max(1, int(limit)))
         with self.connect() as db:
@@ -620,7 +622,7 @@ class Database:
     def list_angel_api_hit_users(self) -> list[str]:
         with self.connect() as db:
             with db.cursor() as cursor:
-                cursor.execute("SELECT DISTINCT username FROM angel_order_api_hits ORDER BY username ASC")
+                cursor.execute("SELECT DISTINCT username FROM angel_order_api_hits WHERE action <> 'login' ORDER BY username ASC")
                 return [str(row["username"]) for row in cursor.fetchall()]
 
     def save_angel_live_entry(

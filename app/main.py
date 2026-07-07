@@ -2331,7 +2331,6 @@ def logout() -> RedirectResponse:
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) -> HTMLResponse:
     trades = cached_trades(50)
-    skipped = cached_skipped(50)
     report = backtest_report_payload(
         start_date=request.query_params.get("from_date"),
         end_date=request.query_params.get("to_date"),
@@ -2344,7 +2343,6 @@ def dashboard(request: Request, user: dict[str, Any] = Depends(require_user)) ->
             "request": request,
             "user": user,
             "trades": trades,
-            "skipped": skipped,
             "stats": trade_stats(trades),
             "active_trade_text": active_trade_text(trades),
             "report": report,
@@ -2447,14 +2445,6 @@ def api_admin_angel_token_refresh_now(user: dict[str, Any] = Depends(require_adm
     with _angel_token_scheduler_lock:
         status = dict(_angel_token_scheduler_status)
     return {"ok": ok, "scheduler": status}
-
-
-@app.post("/api/admin/angel/future-test-order")
-def api_admin_future_test_order(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
-    try:
-        return get_angel_execution().place_test_future_order(str(user["username"]))
-    except AngelExecutionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/user/broker/angel-one/disconnect")

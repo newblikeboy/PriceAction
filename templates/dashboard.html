@@ -45,7 +45,6 @@
         <button type="button" class="side-nav-btn is-active" data-view-target="home">Home</button>
         <button type="button" class="side-nav-btn" data-view-target="reports">Report</button>
         <button type="button" class="side-nav-btn" data-view-target="trades">Paper Trades</button>
-        <button type="button" class="side-nav-btn" data-view-target="skipped">Skipped Signals</button>
         <button type="button" class="side-nav-btn" data-view-target="broker">Broker</button>
         <button type="button" class="side-nav-btn" data-view-target="profile">My Profile</button>
         <button type="button" class="side-nav-btn" data-view-target="helpdesk">Helpdesk</button>
@@ -194,25 +193,6 @@
                 </tr>
                 {% else %}
                 <tr><td colspan="11" class="small">No trades logged yet.</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </article>
-      </section>
-
-      <section class="portal-view" data-view="skipped" hidden>
-        <article class="card view-card">
-          <div class="line-head"><h2>Skipped Signals</h2></div>
-          <p class="small">Rejected signals are retained because they are important for later ML training.</p>
-          <div class="paper-table-wrap">
-            <table class="paper-table">
-              <thead><tr><th>Date</th><th>Time</th><th>Direction</th><th>Setup</th><th>Reason</th></tr></thead>
-              <tbody>
-                {% for item in skipped %}
-                <tr><td>{{ item.date }}</td><td>{{ item.time }}</td><td>{{ item.potential_direction }}</td><td>{{ item.potential_setup }}</td><td>{{ item.skip_reason }}</td></tr>
-                {% else %}
-                <tr><td colspan="5" class="small">No skipped signals logged yet.</td></tr>
                 {% endfor %}
               </tbody>
             </table>
