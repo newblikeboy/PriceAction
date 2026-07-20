@@ -1,6 +1,32 @@
 # Walk-Forward Validation Report — Smart Zone Strategy
 
-**Date:** 2026-07-03 (updated same day with full-engine 2-year backtest, then V2 engine changes)
+**Date:** 2026-07-03 (updated same day with full-engine 2-year backtest, then V2 engine changes; 2021 validation added 2026-07-07)
+
+## PART -4 — Fourth fresh validation: full year 2021 (bull year + Q4 correction) — PASSED
+
+Frozen V2, zero changes, single run (2026-07-07). Pre-registered criteria fixed
+before the run, same as the 2022 exam: positive @2pt cost AND maxDD better than -16R.
+
+Result (198 trades): **+19.94R raw / +12.09R @2pt / +4.25R @4pt. PASS.**
+Points: +641 raw. Winrate 37.4%, mean risk 55.8 pts.
+**MaxDD -8.26R raw (-10.10R @2pt) — PASS.** Bootstrap @2pt: P(<=0) = 21.4%.
+8/12 months positive; the Q4 top + correction (Oct–Dec) cost only -4.67R total.
+Trades: `backtest_v2_validation_2021.csv`.
+
+Setup mix flipped again (regime effect, consistent with prior windows):
+SUPPORT_REACTION carried the year (+28.06R, n=61) — the same setup that was net
+negative in the 2025 audit; the round-2 decision NOT to drop setups is vindicated.
+TREND_CONTINUATION negative again (-6.38R, n=19) — now the weakest setup in
+essentially every window. CE +26.96R vs PE -7.02R — bull-regime direction skew,
+as expected, not edge.
+
+**All fresh windows combined (2021 + 2022 + 2023 + 2026-H1, 673 trades):**
++56.64R raw, **+29.99R @2pt (+0.045R/trade), bootstrap P(<=0) = 14.0%** (was 22.4%
+before 2021). Four out of four fresh years positive after costs. Still short of
+formal significance; forward paper trading remains the deciding gate. 2021 is now
+burned for tuning like all other windows.
+
+---
 
 ## PART -3 — Third fresh validation: full year 2022 (bear/volatile regime) — PASSED
 

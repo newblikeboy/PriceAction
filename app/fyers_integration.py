@@ -224,6 +224,7 @@ class FyersSocketSession:
             ticks = list(self._ticks)
             latest_prices = {symbol: dict(value) for symbol, value in self._latest_prices.items()}
             connected = self._connected
+            latest_tick_at = ticks[0]["received_at"] if ticks else None
         return {
             "running": bool(self._socket),
             "connected": connected,
@@ -232,6 +233,7 @@ class FyersSocketSession:
             "data_type": self.data_type,
             "started_at": self.started_at,
             "error": self.error,
+            "latest_tick_at": latest_tick_at,
             "ticks": ticks,
             "latest_prices": latest_prices,
         }

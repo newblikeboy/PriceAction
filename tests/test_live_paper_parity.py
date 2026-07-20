@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -106,6 +106,47 @@ def test_live_signal_evaluation_blocks_failed_zone(monkeypatch) -> None:
     assert len(database.inserted_skipped) == 1
     assert database.inserted_skipped[0]["potential_setup"] == "SMART_ZONE_BREAK_CONFIRMATION"
     assert database.inserted_skipped[0]["skip_reason"] == "Zone blocked after same-day losing trade"
+
+
+def test_socket_watchdog_restarts_disconnected_socket_after_grace() -> None:
+    started_at = datetime.now(main.IST).replace(tzinfo=None) - timedelta(
+        seconds=main.FYERS_SOCKET_CONNECT_GRACE_SECONDS + 5
+    )
+
+    needs_restart, reason = main.socket_status_needs_restart(
+        {
+            "running": True,
+            "connected": False,
+            "symbols": [main.FYERS_NIFTY_INDEX],
+            "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "latest_prices": {},
+        }
+    )
+
+    assert needs_restart is True
+    assert reason == "socket is not connected"
+
+
+def test_socket_watchdog_restarts_stale_tick_stream() -> None:
+    received_at = datetime.now(main.IST) - timedelta(seconds=main.FYERS_SOCKET_STALE_TICK_SECONDS + 5)
+
+    needs_restart, reason = main.socket_status_needs_restart(
+        {
+            "running": True,
+            "connected": True,
+            "symbols": [main.FYERS_NIFTY_INDEX],
+            "started_at": datetime.now(main.IST).strftime("%Y-%m-%d %H:%M:%S"),
+            "latest_prices": {
+                main.FYERS_NIFTY_INDEX: {
+                    "price": 25000.0,
+                    "received_at": received_at.isoformat(timespec="seconds"),
+                }
+            },
+        }
+    )
+
+    assert needs_restart is True
+    assert reason and reason.startswith("socket tick stale")
 
 
 def _signal(setup_type: str, zone_id: str) -> SignalCandidate:

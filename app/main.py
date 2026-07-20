@@ -83,6 +83,8 @@ _live_trade_monitor_status: dict[str, Any] = {}
 LIVE_DB_SYMBOL = "NIFTY"
 LIVE_TRADE_MONITOR_SECONDS = 30
 LIVE_TRADE_MONITOR_INTERVAL_SECONDS = 2
+FYERS_SOCKET_CONNECT_GRACE_SECONDS = int(os.getenv("FYERS_SOCKET_CONNECT_GRACE_SECONDS", "60"))
+FYERS_SOCKET_STALE_TICK_SECONDS = int(os.getenv("FYERS_SOCKET_STALE_TICK_SECONDS", "90"))
 FYERS_TOTP_REFRESH_HOUR = int(os.getenv("FYERS_TOTP_REFRESH_HOUR", "8"))
 FYERS_TOTP_REFRESH_MINUTE = int(os.getenv("FYERS_TOTP_REFRESH_MINUTE", "0"))
 _fyers_token_scheduler_lock = threading.Lock()
@@ -116,8 +118,10 @@ _market_data_scheduler_status: dict[str, Any] = {
     "socket_running": False,
     "socket_connected": False,
     "last_start_at": None,
+    "last_tick_at": None,
     "last_stop_at": None,
     "next_start_at": None,
+    "last_restart_reason": None,
     "last_error": None,
 }
 logger = logging.getLogger(__name__)
@@ -271,6 +275,9 @@ def refresh_fyers_access_token_job(source: str = "scheduler") -> bool:
                 _fyers_token_scheduler_status["last_error"] = "Fyers response did not include access token"
         if ok:
             logger.info("FYERS TOTP token refresh completed from %s", source)
+            if nse_market_hours_status().get("is_open"):
+                stop_live_market_data_socket(source=f"{source}-token-refresh")
+                start_live_market_data_socket(source=f"{source}-token-refresh")
         return ok
     except Exception as exc:
         with _fyers_token_scheduler_lock:
@@ -471,6 +478,46 @@ def nse_market_close_time(now: datetime | None = None) -> datetime:
     return current.replace(hour=15, minute=30, second=0, microsecond=0)
 
 
+def _parse_ist_status_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(IST).replace(tzinfo=None)
+    return parsed
+
+
+def socket_status_needs_restart(status: dict[str, Any], symbol: str = FYERS_NIFTY_INDEX) -> tuple[bool, str | None]:
+    if not status.get("running"):
+        return True, "socket is not running"
+    if symbol not in (status.get("symbols") or []):
+        return True, f"{symbol} is not subscribed"
+
+    now = datetime.now(IST).replace(tzinfo=None)
+    started_at = _parse_ist_status_time(status.get("started_at"))
+    latest_prices = status.get("latest_prices") if isinstance(status.get("latest_prices"), dict) else {}
+    latest = latest_prices.get(symbol) if isinstance(latest_prices, dict) else None
+    latest_price_at = _parse_ist_status_time(latest.get("received_at")) if isinstance(latest, dict) else None
+    latest_tick_at = _parse_ist_status_time(status.get("latest_tick_at"))
+    last_seen_at = latest_price_at or latest_tick_at
+
+    if not status.get("connected"):
+        if started_at and (now - started_at).total_seconds() < FYERS_SOCKET_CONNECT_GRACE_SECONDS:
+            return False, None
+        return True, "socket is not connected"
+    if last_seen_at and (now - last_seen_at).total_seconds() > FYERS_SOCKET_STALE_TICK_SECONDS:
+        return True, f"socket tick stale for {int((now - last_seen_at).total_seconds())}s"
+    if not last_seen_at and started_at and (now - started_at).total_seconds() > FYERS_SOCKET_CONNECT_GRACE_SECONDS:
+        return True, "socket connected without ticks"
+    return False, None
+
+
 def start_live_market_data_socket(source: str = "scheduler") -> bool:
     market_hours = nse_market_hours_status()
     with _market_data_scheduler_lock:
@@ -479,19 +526,26 @@ def start_live_market_data_socket(source: str = "scheduler") -> bool:
         with _market_data_scheduler_lock:
             _market_data_scheduler_status["socket_running"] = False
             _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_tick_at"] = None
             _market_data_scheduler_status["last_error"] = market_hours["reason"]
         return False
     try:
         session = get_socket_session()
         with _live_socket_lock:
             status = session.status()
-            if not status.get("running") or FYERS_NIFTY_INDEX not in (status.get("symbols") or []):
+            should_restart, restart_reason = socket_status_needs_restart(status)
+            if should_restart:
+                if status.get("running"):
+                    logger.warning("Restarting FYERS market data socket from %s: %s", source, restart_reason)
+                    session.stop()
                 session.start([FYERS_NIFTY_INDEX], data_type="SymbolUpdate")
                 status = session.status()
         with _market_data_scheduler_lock:
             _market_data_scheduler_status["socket_running"] = bool(status.get("running"))
             _market_data_scheduler_status["socket_connected"] = bool(status.get("connected"))
             _market_data_scheduler_status["last_start_at"] = datetime.now(IST).isoformat(timespec="seconds")
+            _market_data_scheduler_status["last_tick_at"] = status.get("latest_tick_at")
+            _market_data_scheduler_status["last_restart_reason"] = restart_reason
             _market_data_scheduler_status["last_error"] = status.get("error")
         logger.info("FYERS market data socket start checked from %s", source)
         return bool(status.get("running"))
@@ -499,6 +553,7 @@ def start_live_market_data_socket(source: str = "scheduler") -> bool:
         with _market_data_scheduler_lock:
             _market_data_scheduler_status["socket_running"] = False
             _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_tick_at"] = None
             _market_data_scheduler_status["last_error"] = str(exc)
         logger.exception("FYERS market data socket start failed from %s", source)
         return False
@@ -512,6 +567,7 @@ def stop_live_market_data_socket(source: str = "scheduler") -> None:
         with _market_data_scheduler_lock:
             _market_data_scheduler_status["socket_running"] = False
             _market_data_scheduler_status["socket_connected"] = False
+            _market_data_scheduler_status["last_tick_at"] = None
             _market_data_scheduler_status["last_stop_at"] = datetime.now(IST).isoformat(timespec="seconds")
             _market_data_scheduler_status["last_error"] = None
         logger.info("FYERS market data socket stopped from %s", source)
@@ -533,6 +589,7 @@ def market_data_scheduler_worker() -> None:
                 _market_data_scheduler_status["next_start_at"] = next_start.isoformat(timespec="seconds")
                 _market_data_scheduler_status["socket_running"] = False
                 _market_data_scheduler_status["socket_connected"] = False
+                _market_data_scheduler_status["last_tick_at"] = None
             wait_seconds = max(0.0, (next_start - datetime.now(IST)).total_seconds())
             if _market_data_scheduler_stop.wait(wait_seconds):
                 break
