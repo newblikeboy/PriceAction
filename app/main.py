@@ -2158,9 +2158,15 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
                 payload["cache"] = {"hit": True, "ttl_seconds": CHART_CACHE_TTL_SECONDS}
                 return payload
 
-        end = datetime.now(IST).date()
-        start = end - timedelta(days=days - 1)
         db = get_db()
+        today = datetime.now(IST).date()
+        trading_dates = db.latest_candle_dates(timeframe, symbol=symbol, end_date=today.isoformat(), limit=days)
+        if trading_dates:
+            start = trading_dates[0]
+            end = trading_dates[-1]
+        else:
+            end = today
+            start = end - timedelta(days=days - 1)
         chart_rows = db.load_chart_candles(timeframe, symbol=symbol, start_date=start.isoformat(), end_date=end.isoformat())
         candles = candle_payload(chart_rows)
         price_range = candle_price_range(candles)
@@ -2196,6 +2202,8 @@ def cached_admin_chart_base(timeframe: str, symbol: str, days: int) -> dict[str,
             "source_symbol": FYERS_NIFTY_INDEX,
             "timeframe": timeframe,
             "days": days,
+            "date_window": "trading_sessions",
+            "trading_dates": [item.isoformat() for item in trading_dates],
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "candles": candles,

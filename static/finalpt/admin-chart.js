@@ -30,7 +30,7 @@
   let zoneRedrawTimer = null;
 
   function cacheKey() {
-    return `priceAction.chart.${timeframe}.3`;
+    return `priceAction.chart.${timeframe}.sessions3`;
   }
 
   const chart = LightweightCharts.createChart(chartEl, {

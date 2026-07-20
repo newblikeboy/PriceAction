@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import pbkdf2_hmac
 from typing import Any
 
@@ -1431,6 +1431,42 @@ class Database:
             with db.cursor() as cursor:
                 cursor.execute(sql, tuple(params))
                 return list(cursor.fetchall())
+
+    def latest_candle_dates(
+        self,
+        timeframe: str,
+        symbol: str = "NIFTY",
+        end_date: str | None = None,
+        limit: int = 3,
+    ) -> list[date]:
+        table = self.candle_table(timeframe)
+        where = ["symbol = %s"]
+        params: list[Any] = [symbol]
+        if end_date:
+            where.append("candle_time <= %s")
+            params.append(f"{end_date} 23:59:59")
+        sql = f"""
+            SELECT DISTINCT DATE(candle_time) AS trading_date
+            FROM {table}
+            WHERE {" AND ".join(where)}
+            ORDER BY trading_date DESC
+            LIMIT %s
+        """
+        params.append(max(1, int(limit)))
+        with self.connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        dates: list[date] = []
+        for row in rows:
+            value = row.get("trading_date")
+            if isinstance(value, datetime):
+                dates.append(value.date())
+            elif isinstance(value, date):
+                dates.append(value)
+            elif value:
+                dates.append(pd.to_datetime(value).date())
+        return sorted(dates)
 
     def candle_counts(self, symbol: str = "NIFTY") -> dict[str, int]:
         out: dict[str, int] = {}
