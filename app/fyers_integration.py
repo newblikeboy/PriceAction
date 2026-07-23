@@ -112,6 +112,7 @@ class FyersSocketSession:
         self._latest_prices: dict[str, dict[str, Any]] = {}
         self._connected = False
         self._lock = threading.Lock()
+        self._recovery_in_progress = False
 
     def start(self, symbols: list[str], data_type: str = "SymbolUpdate") -> None:
         self.stop()
@@ -128,6 +129,7 @@ class FyersSocketSession:
         self.data_type = data_type
         self.started_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         self.error = None
+        self._recovery_in_progress = False
         with self._lock:
             self._latest_prices = {}
             self._connected = False
@@ -156,11 +158,13 @@ class FyersSocketSession:
             with self._lock:
                 self._connected = False
             onmessage({"type": "error", "message": message})
+            threading.Thread(target=self._recover_socket_after_disconnect, args=(str(message),), daemon=True).start()
 
         def onclose(message: Any) -> None:
             with self._lock:
                 self._connected = False
             onmessage({"type": "closed", "message": message})
+            threading.Thread(target=self._recover_socket_after_disconnect, args=(str(message),), daemon=True).start()
 
         def onopen() -> None:
             self._socket.subscribe(symbols=symbols, data_type=data_type)
@@ -183,8 +187,25 @@ class FyersSocketSession:
         self._guard_thread = threading.Thread(target=self._market_hours_guard, daemon=True)
         self._guard_thread.start()
 
+    def _recover_socket_after_disconnect(self, reason: str) -> None:
+        if self._recovery_in_progress:
+            return
+        self._recovery_in_progress = True
+        try:
+            self.error = f"Socket dropped while connected to FYERS: {reason}. Refreshing token and reconnecting..."
+            refresh = getattr(self.loader, "refresh_fyers_access_token_with_totp", None)
+            if callable(refresh):
+                refresh()
+            if self.symbols:
+                self.start(self.symbols, self.data_type)
+        except Exception as exc:
+            self.error = f"FYERS socket recovery failed after disconnect: {exc}"
+        finally:
+            self._recovery_in_progress = False
+
     def stop(self) -> None:
         self._guard_stop.set()
+        self._recovery_in_progress = False
         if self._socket:
             try:
                 self._socket.close_connection()
